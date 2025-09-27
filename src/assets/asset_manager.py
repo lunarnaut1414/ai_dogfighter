@@ -45,6 +45,9 @@ class AssetInfo:
     last_update_time: float = 0.0
     total_distance_traveled: float = 0.0
     previous_position: np.ndarray = None
+    
+    # Mission parameters
+    priority: str = "medium"  # Add priority field with default value
 
 
 class AssetManager:

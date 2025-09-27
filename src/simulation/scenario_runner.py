@@ -226,10 +226,11 @@ class ScenarioRunner:
             
             self.target_ids.append(target_id)
             
-            # Set priority if specified
+            # Set priority if specified  
             if 'priority' in target_config:
-                # Don't try to subscript the assets directly
-                self.asset_manager.assets._assets[target_id].priority = target_config['priority']
+                # Store priority as an attribute on the AssetInfo object
+                if target_id in self.asset_manager.assets:
+                    setattr(self.asset_manager.assets[target_id], 'priority', target_config['priority'])
                 
     def _setup_sensors(self):
         """Initialize sensor model."""
@@ -328,9 +329,7 @@ class ScenarioRunner:
                 step_start = time.time()
                 
                 # Update simulation - temporarily swap back to original assets
-                self.asset_manager.assets = self.asset_manager._original_assets
                 self.asset_manager.update()
-                self.asset_manager.assets = self.asset_manager._wrapped_assets
                 
                 # Get interceptor state
                 interceptor = self.asset_manager.get_asset(self.interceptor_id)
