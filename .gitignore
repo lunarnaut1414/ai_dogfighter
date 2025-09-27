@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data
+data/logs/*
+!data/logs/.gitkeep
+data/models/*.pth
+data/models/*.h5
+*.log
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+
+# ROS2
+install/
+build/
+log/
+
+# Jetson
+*.tensorrt
+*.engine
+
+# OS
+.DS_Store
+Thumbs.db
