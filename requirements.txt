@@ -1,0 +1,66 @@
+# Core Scientific Computing
+numpy>=1.21.0
+scipy>=1.7.0
+numba>=0.54.0          # JIT compilation for performance
+
+# Visualization
+matplotlib>=3.5.0
+plotly>=5.0.0          # Interactive 3D plots
+vispy>=0.11.0          # High-performance 3D visualization
+pillow>=9.0.0          # Image processing
+
+# 3D Graphics and Geometry
+trimesh>=3.15.0        # 3D mesh processing
+pyopengl>=3.1.6        # OpenGL bindings
+pyopengl-accelerate>=3.1.6  # OpenGL acceleration
+shapely>=2.0.0         # Geometric operations
+rtree>=1.0.0           # Spatial indexing
+
+# Noise Generation
+noise>=1.2.2           # Perlin noise
+opensimplex>=0.4.3     # Alternative noise generation
+
+# Configuration
+pyyaml>=6.0            # YAML config files
+pydantic>=2.0.0        # Data validation
+
+# Performance and Optimization
+cython>=0.29.0         # C extensions (optional)
+h5py>=3.7.0            # HDF5 for large datasets
+zarr>=2.13.0           # Alternative to HDF5
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=3.0.0
+pytest-benchmark>=3.4.1
+
+# Development Tools
+black>=22.0.0          # Code formatting
+flake8>=5.0.0          # Linting
+mypy>=0.990            # Type checking
+ipython>=8.0.0         # Interactive development
+jupyter>=1.0.0         # Notebooks for experimentation
+
+# Simulation Environment (Gymnasium)
+gymnasium>=0.29.0      # OpenAI Gym successor
+stable-baselines3>=2.0.0  # RL algorithms (optional, for future)
+
+# ROS2 Integration (optional for now)
+# Uncomment if using ROS2:
+# rclpy  # Installed via ROS2, not pip
+
+# Physics Simulation (optional alternatives)
+# pybullet>=3.2.0      # If you want physics engine
+# pymunk>=6.4.0        # 2D physics (lightweight option)
+
+# Parallel Processing
+multiprocessing-logging>=0.3.4
+joblib>=1.2.0
+
+# Data Management
+pandas>=1.5.0          # Data analysis
+xarray>=2023.0.0       # N-dimensional arrays with labels
+
+# Optional GPU Acceleration (for NVIDIA Jetson)
+# cupy>=11.0.0         # GPU arrays (requires CUDA)
+# pycuda>=2022.1       # Direct CUDA access
