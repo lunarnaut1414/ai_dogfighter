@@ -540,3 +540,9 @@ class Aircraft3DOF:
                 f"Heading={np.degrees(self.state.heading):.0f}°, "
                 f"Climb={self.get_climb_rate():.1f}m/s, "
                 f"Mode={self.mode.value}")
+        
+        
+    def apply_wind(self, wind_vector):
+        """Apply wind effects to aircraft"""
+        self.wind = np.array(wind_vector)
+        # Update ground speed vs airspeed calculations

@@ -1,0 +1,282 @@
+# configs/battlespace/default_battlespace.yaml
+# Default battlespace configuration for interceptor drone guidance testing
+# Standard 50km x 50km operational area with 15km altitude ceiling
+
+battlespace:
+  # Core dimensions - defines the operational volume
+  dimensions:
+    width: 50000              # X-axis extent in meters (East-West)
+    height: 50000             # Y-axis extent in meters (North-South)
+    altitude_ceiling: 15000   # Maximum operational altitude in meters
+    grid_resolution: 100      # Terrain grid cell size in meters
+    
+  # Coordinate system definition
+  coordinate_system:
+    origin: "southwest"       # Origin at SW corner (0, 0, 0)
+    x_axis: "east"           # X increases eastward
+    y_axis: "north"          # Y increases northward
+    z_axis: "up"             # Z increases upward (altitude)
+    units: "meters"          # All measurements in meters
+    reference_frame: "ENU"    # East-North-Up coordinate frame
+    
+  # Terrain generation parameters
+  terrain:
+    generator: "perlin"       # Perlin noise for realistic terrain
+    seed: 42                  # Random seed for reproducible terrain
+    enabled: true            
+    
+    # Perlin noise parameters for terrain generation
+    parameters:
+      octaves: 6              # Number of noise layers (detail level)
+      frequency: 0.0001       # Base frequency (terrain feature size)
+      amplitude: 2000         # Maximum elevation variation in meters
+      persistence: 0.5        # Amplitude reduction per octave
+      lacunarity: 2.0         # Frequency multiplier per octave
+      base_elevation: 100     # Baseline ground level in meters
+      
+    # Terrain type classification by elevation
+    terrain_types:
+      water:
+        max_elevation: 0      # Below sea level
+        friction_modifier: 0.8
+        radar_reflectivity: 0.1
+      grassland:
+        min_elevation: 0
+        max_elevation: 500
+        friction_modifier: 1.0
+        radar_reflectivity: 0.3
+      forest:
+        min_elevation: 500
+        max_elevation: 1500
+        friction_modifier: 1.2
+        radar_reflectivity: 0.5
+      mountain:
+        min_elevation: 1500
+        max_elevation: 3000
+        friction_modifier: 1.5
+        radar_reflectivity: 0.7
+      peak:
+        min_elevation: 3000
+        friction_modifier: 2.0
+        radar_reflectivity: 0.9
+        
+  # Airspace configuration
+  airspace:
+    # Operational boundaries
+    boundaries:
+      min_altitude: 50        # Minimum safe altitude AGL in meters
+      max_altitude: 15000     # Service ceiling in meters
+      buffer_zone: 500        # Safety buffer from edges in meters
+      
+    # No-fly zones (for testing obstacle avoidance)
+    no_fly_zones:
+      - name: "Restricted Area Alpha"
+        type: "cylinder"
+        center: [25000, 35000]  # Center position (x, y)
+        radius: 2000            # Radius in meters
+        min_altitude: 0         # From ground
+        max_altitude: 5000      # Up to 5km altitude
+        
+      - name: "Mountain Peak Zone"
+        type: "polygon"
+        vertices:               # Polygon vertices (x, y)
+          - [10000, 10000]
+          - [15000, 10000]
+          - [15000, 15000]
+          - [10000, 15000]
+        min_altitude: 0
+        max_altitude: 3000
+        
+    # Threat zones (for engagement scenarios)
+    threat_zones:
+      - name: "SAM Site Alpha"
+        type: "sam_site"
+        position: [35000, 25000, 100]  # Position (x, y, z)
+        max_range: 8000                 # Detection range in meters
+        max_altitude: 10000             # Engagement ceiling
+        min_altitude: 100               # Minimum engagement altitude
+        threat_level: 0.8               # 0-1 threat severity
+        active: true
+        
+      - name: "Enemy Airbase"
+        type: "airbase"
+        position: [40000, 40000, 200]
+        runway_heading: 45             # Degrees from north
+        runway_length: 2000            # Meters
+        control_radius: 5000           # Controlled airspace radius
+        threat_level: 0.6
+        active: true
+        
+  # Environmental conditions
+  environment:
+    # Atmospheric model
+    atmosphere:
+      model: "ISA"              # International Standard Atmosphere
+      temperature_offset: 0     # Delta ISA in Celsius
+      pressure_offset: 0        # Pressure deviation in Pa
+      
+    # Wind configuration
+    wind:
+      # Base wind at ground level
+      base_wind:
+        speed: 10               # m/s
+        direction: 270          # Degrees (from west)
+        
+      # Wind variation with altitude
+      altitude_variation:
+        enabled: true
+        gradient_coefficient: 1.5  # Wind speed multiplier at ceiling
+        shear_layer: 1000          # Altitude of max shear in meters
+        direction_change: 30       # Max direction change in degrees
+        
+      # Turbulence model
+      turbulence:
+        enabled: true
+        base_intensity: 0.1     # 0-1 scale
+        gust_factor: 1.5        # Maximum gust multiplier
+        correlation_distance: 100  # Spatial correlation in meters
+        
+    # Weather presets for different scenarios
+    weather_presets:
+      clear:
+        visibility: 50000       # Meters
+        cloud_base: 10000      # Meters
+        cloud_cover: 0.1       # 0-1 fraction
+        precipitation: 0       # mm/hr
+        turbulence_modifier: 1.0
+        
+      cloudy:
+        visibility: 20000
+        cloud_base: 3000
+        cloud_cover: 0.6
+        precipitation: 0
+        turbulence_modifier: 1.2
+        
+      stormy:
+        visibility: 5000
+        cloud_base: 1000
+        cloud_cover: 0.9
+        precipitation: 10
+        turbulence_modifier: 2.0
+        
+      fog:
+        visibility: 500
+        cloud_base: 0
+        cloud_cover: 1.0
+        precipitation: 0
+        turbulence_modifier: 0.5
+        
+    # Default weather
+    current_weather: "clear"
+    
+  # Sensor environment effects
+  sensors:
+    # Radar propagation
+    radar:
+      ground_clutter: true
+      atmospheric_attenuation: true
+      multipath: true
+      doppler_effects: true
+      
+    # Optical sensors
+    optical:
+      atmospheric_scattering: true
+      sun_glare: true
+      fog_effects: true
+      precipitation_effects: true
+      
+    # IR sensors  
+    infrared:
+      atmospheric_absorption: true
+      thermal_noise: true
+      sun_effects: true
+      ground_radiation: true
+      
+  # Structures (Phase 2 - currently disabled)
+  structures:
+    enabled: false              # Will be enabled in Phase 2
+    urban_areas: []
+    buildings: []
+    infrastructure: []
+    
+  # Performance optimization
+  optimization:
+    # Level of detail (LOD) settings
+    lod:
+      enabled: true
+      distances: [1000, 5000, 10000, 20000]  # LOD transition distances
+      terrain_decimation: [1, 2, 4, 8]       # Grid skip factors
+      
+    # Caching settings
+    cache:
+      elevation_cache_size: 10000    # Number of cached elevation queries
+      los_cache_size: 5000           # Number of cached LOS checks
+      wind_cache_size: 1000          # Number of cached wind calculations
+      
+    # Update rates for different systems
+    update_rates:
+      terrain: 10               # Hz - Terrain collision checks
+      weather: 1                # Hz - Weather updates
+      wind: 5                   # Hz - Wind field updates
+      threats: 2                # Hz - Threat zone updates
+      
+  # Visualization settings (for debugging)
+  visualization:
+    enabled: true
+    render_distance: 30000      # Maximum render distance in meters
+    
+    # Display layers
+    show_terrain: true
+    show_terrain_grid: false
+    show_no_fly_zones: true
+    show_threat_zones: true
+    show_wind_vectors: false
+    show_waypoints: true
+    show_trajectories: true
+    
+    # Color schemes
+    colors:
+      terrain_low: [0.2, 0.4, 0.1]    # RGB: Dark green
+      terrain_mid: [0.4, 0.3, 0.2]    # RGB: Brown
+      terrain_high: [0.8, 0.8, 0.8]   # RGB: Gray/white
+      water: [0.1, 0.3, 0.5]          # RGB: Blue
+      no_fly_zone: [1.0, 0.2, 0.2]    # RGB: Red
+      threat_zone: [1.0, 0.5, 0.0]    # RGB: Orange
+      safe_zone: [0.0, 1.0, 0.0]      # RGB: Green
+      
+  # Mission-specific parameters
+  mission:
+    # Default engagement rules
+    engagement:
+      min_intercept_altitude: 100     # Minimum altitude for intercept
+      max_intercept_range: 15000      # Maximum engagement range
+      min_intercept_range: 50         # Minimum safe distance
+      time_to_intercept_limit: 300    # Maximum pursuit time in seconds
+      
+    # Safety parameters
+    safety:
+      geofence_enabled: true
+      min_battery_reserve: 0.2        # 20% battery reserve
+      max_g_force: 9.0                # Maximum G-force limit
+      collision_avoidance_range: 100  # Meters
+      terrain_avoidance_margin: 50    # Minimum altitude above terrain
+      
+    # Search patterns
+    search_patterns:
+      spiral:
+        initial_radius: 1000
+        expansion_rate: 500            # Meters per revolution
+        altitude: 3000
+        speed: 40                      # m/s
+        
+      grid:
+        spacing: 2000                  # Grid line spacing
+        altitude: 3000
+        speed: 45
+        overlap: 0.1                   # 10% overlap
+        
+      random:
+        num_waypoints: 20
+        min_altitude: 1000
+        max_altitude: 5000
+        speed: 50

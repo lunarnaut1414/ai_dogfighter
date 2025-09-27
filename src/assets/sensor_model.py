@@ -463,3 +463,103 @@ class SensorModel:
         self.tracks.clear()
         self.next_track_id = 0
         self.last_update_time = 0.0
+
+    def detect(self, 
+            sensor_position: np.ndarray,
+            sensor_velocity: np.ndarray,
+            target_position: np.ndarray,
+            target_velocity: np.ndarray,
+            battlespace=None,
+            current_time: float = 0.0) -> Optional[Dict[str, Any]]:
+        """
+        Simple detection method for compatibility with scenario runner.
+        
+        Args:
+            sensor_position: Sensor platform position [x, y, z]
+            sensor_velocity: Sensor platform velocity vector
+            target_position: Target position [x, y, z]
+            target_velocity: Target velocity vector
+            battlespace: Battlespace instance (optional)
+            current_time: Current simulation time
+            
+        Returns:
+            Detection dictionary or None if not detected
+        """
+        # Ensure inputs are numpy arrays
+        sensor_position = np.array(sensor_position)
+        target_position = np.array(target_position)
+        sensor_velocity = np.array(sensor_velocity) if sensor_velocity is not None else np.zeros(3)
+        target_velocity = np.array(target_velocity) if target_velocity is not None else np.zeros(3)
+        
+        # Calculate range
+        range_vector = target_position - sensor_position
+        range_to_target = np.linalg.norm(range_vector)
+        
+        # Check max range
+        if range_to_target > self.config.max_range:
+            return None
+        
+        # Calculate bearing and elevation
+        bearing = np.arctan2(range_vector[1], range_vector[0])
+        horizontal_range = np.sqrt(range_vector[0]**2 + range_vector[1]**2)
+        elevation = np.arctan2(range_vector[2], horizontal_range) if horizontal_range > 0 else 0
+        
+        # Check field of view (simplified)
+        # Assuming sensor is pointed forward along velocity vector or heading
+        sensor_speed = np.linalg.norm(sensor_velocity[:2])
+        if sensor_speed > 0.1:
+            sensor_heading = np.arctan2(sensor_velocity[1], sensor_velocity[0])
+        else:
+            sensor_heading = 0  # Default forward
+        
+        relative_bearing = bearing - sensor_heading
+        # Normalize to [-pi, pi]
+        while relative_bearing > np.pi:
+            relative_bearing -= 2 * np.pi
+        while relative_bearing < -np.pi:
+            relative_bearing += 2 * np.pi
+        
+        # Check FOV limits (fov_azimuth and fov_elevation are in degrees in config)
+        fov_az_rad = np.radians(self.config.fov_azimuth) / 2
+        fov_el_rad = np.radians(self.config.fov_elevation) / 2
+        
+        if abs(relative_bearing) > fov_az_rad:
+            return None
+        if abs(elevation) > fov_el_rad:
+            return None
+        
+        # Check line of sight if battlespace provided
+        if battlespace is not None:
+            try:
+                if hasattr(battlespace, 'get_line_of_sight'):
+                    if not battlespace.get_line_of_sight(sensor_position, target_position):
+                        return None
+            except:
+                pass  # Continue if LOS check fails
+        
+        # Simple detection probability based on range
+        max_range = self.config.max_range
+        detection_prob = max(0.0, 1.0 - (range_to_target / max_range) ** 2)
+        
+        # Random detection based on probability
+        if np.random.random() > detection_prob:
+            return None
+        
+        # Add measurement noise
+        position_error = self.config.position_error_std * (1 + range_to_target / 10000)
+        measured_position = target_position + np.random.randn(3) * position_error
+        
+        velocity_error = self.config.velocity_error_std
+        measured_velocity = target_velocity + np.random.randn(3) * velocity_error
+        
+        # Return detection
+        return {
+            'detected': True,
+            'position': measured_position.tolist(),  # Convert to list for JSON serialization
+            'velocity': measured_velocity.tolist(),
+            'range': float(range_to_target),
+            'bearing': float(bearing),
+            'elevation': float(elevation),
+            'quality': float(detection_prob),
+            'timestamp': float(current_time)
+        }

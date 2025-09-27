@@ -1,13 +1,52 @@
 """
 Airspace management for battlespace environment.
 Handles no-fly zones, altitude restrictions, and threat zones.
+FIXED VERSION - handles both cylinder/polygon zones and position/center keys
 """
 
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 from dataclasses import dataclass
-from shapely.geometry import Point, Polygon
-from shapely.geometry.polygon import LinearRing
+
+# Try to import shapely, but provide fallback if not available
+try:
+    from shapely.geometry import Point, Polygon
+except ImportError:
+    print("Warning: shapely not installed. Using simplified polygon implementation.")
+    
+    class Point:
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+            
+    class Polygon:
+        def __init__(self, points):
+            self.points = list(points)
+            
+        def contains(self, point):
+            """Simple point-in-polygon test using ray casting"""
+            if isinstance(point, Point):
+                x, y = point.x, point.y
+            else:
+                x, y = point
+                
+            points = self.points
+            n = len(points)
+            inside = False
+            
+            p1x, p1y = points[0]
+            for i in range(1, n + 1):
+                p2x, p2y = points[i % n]
+                if y > min(p1y, p2y):
+                    if y <= max(p1y, p2y):
+                        if x <= max(p1x, p2x):
+                            if p1y != p2y:
+                                xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                            if p1x == p2x or x <= xinters:
+                                inside = not inside
+                p1x, p1y = p2x, p2y
+                
+            return inside
 
 
 @dataclass
@@ -119,25 +158,74 @@ class AirspaceLayer:
     
     def _load_from_config(self):
         """Load airspace zones from configuration."""
+        # Process no-fly zones
         if 'no_fly_zones' in self.config:
-            for zone_config in self.config['no_fly_zones']:
-                self.add_no_fly_zone(
-                    zone_config['polygon'],
-                    zone_config.get('min_altitude', 0),
-                    zone_config.get('max_altitude', self.altitude_ceiling),
-                    zone_config.get('name', 'Restricted Area')
-                )
+            for i, zone_config in enumerate(self.config['no_fly_zones']):
+                try:
+                    # Handle different zone types
+                    zone_type = zone_config.get('type', 'polygon')
+                    
+                    if zone_type == 'cylinder':
+                        # Create circular polygon for cylinder
+                        center = zone_config.get('center', [0, 0])
+                        radius = zone_config.get('radius', 1000)
+                        
+                        # Create circle with 32 points
+                        angles = np.linspace(0, 2*np.pi, 32)
+                        polygon_points = [
+                            (center[0] + radius * np.cos(a), 
+                             center[1] + radius * np.sin(a))
+                            for a in angles
+                        ]
+                    elif zone_type == 'polygon':
+                        # Use vertices directly
+                        polygon_points = zone_config.get('vertices', [])
+                    else:
+                        print(f"Warning: Unknown no-fly zone type '{zone_type}', skipping")
+                        continue
+                        
+                    if polygon_points:
+                        self.add_no_fly_zone(
+                            polygon_points,
+                            zone_config.get('min_altitude', 0),
+                            zone_config.get('max_altitude', self.altitude_ceiling),
+                            zone_config.get('name', f'Restricted Area {i+1}')
+                        )
+                except Exception as e:
+                    print(f"Warning: Failed to load no-fly zone {i}: {e}")
+                    continue
         
+        # Process threat zones
         if 'threat_zones' in self.config:
-            for threat_config in self.config['threat_zones']:
-                self.add_threat_zone(
-                    np.array(threat_config['center']),
-                    threat_config['max_range'],
-                    threat_config['max_altitude'],
-                    threat_config.get('min_altitude', 0),
-                    threat_config.get('threat_level', 1.0),
-                    threat_config.get('name', 'Threat')
-                )
+            for i, threat_config in enumerate(self.config['threat_zones']):
+                try:
+                    # Handle both 'position' and 'center' keys
+                    if 'position' in threat_config:
+                        center_pos = threat_config['position']
+                    elif 'center' in threat_config:
+                        center_pos = threat_config['center']
+                    else:
+                        print(f"Warning: Threat zone {i} missing position/center, using default [0,0,0]")
+                        center_pos = [0, 0, 0]
+                    
+                    # Ensure center is 3D
+                    if len(center_pos) == 2:
+                        center_pos = [center_pos[0], center_pos[1], 0]
+                    elif len(center_pos) != 3:
+                        print(f"Warning: Invalid position for threat zone {i}, using [0,0,0]")
+                        center_pos = [0, 0, 0]
+                        
+                    self.add_threat_zone(
+                        np.array(center_pos),
+                        threat_config.get('max_range', 5000),
+                        threat_config.get('max_altitude', 10000),
+                        threat_config.get('min_altitude', 0),
+                        threat_config.get('threat_level', 1.0),
+                        threat_config.get('name', f'Threat {i+1}')
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to load threat zone {i}: {e}")
+                    continue
     
     def add_no_fly_zone(self, polygon_points: List[Tuple[float, float]],
                        min_altitude: float, max_altitude: float,
@@ -186,6 +274,12 @@ class AirspaceLayer:
         Returns:
             Created threat zone
         """
+        # Ensure center is numpy array with 3 dimensions
+        if len(center) == 2:
+            center = np.array([center[0], center[1], 0])
+        else:
+            center = np.array(center)
+            
         zone = ThreatZone(
             id=self.next_zone_id,
             center=center,
@@ -351,28 +445,36 @@ class AirspaceLayer:
         Find safe altitude corridor between two points.
         
         Args:
-            start: Start position [x, y, z]
-            end: End position [x, y, z]
-            num_samples: Number of points to sample
+            start: Starting position [x, y, z]
+            end: Ending position [x, y, z]
+            num_samples: Number of points to sample along path
             
         Returns:
-            List of safe altitudes along path, or None if no safe path
+            List of safe altitudes at each sample point, or None if no safe path
         """
         safe_altitudes = []
         
         for i in range(num_samples):
-            t = i / (num_samples - 1)
+            t = i / (num_samples - 1) if num_samples > 1 else 0
             x = start[0] + t * (end[0] - start[0])
             y = start[1] + t * (end[1] - start[1])
             
-            min_alt, max_alt = self.get_safe_altitude_range(x, y)
+            min_safe, max_safe = self.get_safe_altitude_range(x, y)
             
-            if min_alt >= max_alt:
-                # No safe altitude at this point
-                return None
-            
+            if min_safe >= max_safe:
+                return None  # No safe altitude at this point
+                
             # Choose middle of safe range
-            safe_alt = (min_alt + max_alt) / 2
+            safe_alt = (min_safe + max_safe) / 2
             safe_altitudes.append(safe_alt)
         
         return safe_altitudes
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get airspace statistics"""
+        return {
+            'no_fly_zones': len(self.no_fly_zones),
+            'threat_zones': len(self.threat_zones),
+            'controlled_airspace': len(self.controlled_airspace),
+            'altitude_ceiling': self.altitude_ceiling
+        }

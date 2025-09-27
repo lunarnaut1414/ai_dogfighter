@@ -448,20 +448,88 @@ class AssetManager:
                 'fuel': state.fuel_remaining
             })
             
-    def get_asset_state(self, asset_id: str) -> Optional[AircraftState]:
+    def get_asset(self, asset_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get current state of an asset.
+        Get asset information as a dictionary (for compatibility).
         
         Args:
             asset_id: Asset identifier
             
         Returns:
-            Aircraft state or None if not found
+            Dictionary with asset information or None if not found
         """
         if asset_id not in self.assets:
             return None
-        return self.assets[asset_id].aircraft.state
+            
+        asset_info = self.assets[asset_id]
         
+        # Convert AssetInfo to dictionary format expected by scenario runner
+        return {
+            'id': asset_info.asset_id,
+            'type': asset_info.asset_type.value,
+            'state': {
+                'position': asset_info.aircraft.state.position.copy(),
+                'velocity': asset_info.aircraft.state.velocity,
+                'velocity_vector': asset_info.aircraft.state.get_velocity_vector(),
+                'heading': asset_info.aircraft.state.heading,
+                'climb_angle': asset_info.aircraft.state.flight_path_angle,
+                'fuel_fraction': asset_info.aircraft.state.fuel_remaining / asset_info.aircraft.fuel_capacity,
+                'throttle': asset_info.aircraft.state.throttle
+            },
+            'aircraft': asset_info.aircraft,
+            'team': asset_info.team,
+            'behavior': asset_info.behavior_mode,
+            'priority': getattr(asset_info, 'priority', 'medium')
+        }
+        
+    def get_all_assets(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get all assets as dictionaries.
+        
+        Returns:
+            Dictionary mapping asset_id to asset info dictionaries
+        """
+        return {
+            asset_id: self.get_asset(asset_id)
+            for asset_id in self.assets
+        }
+        
+    def set_commands(self, asset_id: str, commands: Dict[str, Any]):
+        """
+        Set control commands for an asset.
+        
+        Args:
+            asset_id: Asset to control
+            commands: Dictionary with commanded_heading, commanded_altitude, commanded_throttle
+        """
+        if asset_id not in self.assets:
+            return
+            
+        aircraft = self.assets[asset_id].aircraft
+        
+        # Convert guidance commands to control inputs
+        if 'commanded_heading' in commands:
+            # Calculate bank angle for desired heading change
+            current_heading = aircraft.state.heading
+            heading_error = commands['commanded_heading'] - current_heading
+            
+            # Normalize heading error to [-pi, pi]
+            while heading_error > np.pi:
+                heading_error -= 2 * np.pi
+            while heading_error < -np.pi:
+                heading_error += 2 * np.pi
+                
+            # Simple proportional control for bank angle
+            bank_angle = np.clip(heading_error * 2.0, -aircraft.bank_angle_max, aircraft.bank_angle_max)
+            aircraft.set_controls(bank_angle=bank_angle)
+            
+        if 'commanded_altitude' in commands:
+            # Store commanded altitude for flight controller
+            aircraft.commanded_altitude = commands['commanded_altitude']
+            
+        if 'commanded_throttle' in commands:
+            aircraft.set_controls(throttle=commands['commanded_throttle'])
+
     def get_assets_in_range(self, position: np.ndarray, range_m: float) -> List[str]:
         """
         Find all assets within range of position.
