@@ -1,0 +1,98 @@
+# configs/scenarios/multi_target.yaml
+scenario:
+  name: "Multi-Target Engagement"
+  description: "Multiple targets with different behaviors"
+  battlespace: "configs/battlespace/default_battlespace.yaml"
+  
+  # Simulation parameters
+  duration: 600  # seconds
+  update_rate: 50  # Hz
+  
+  # Interceptor
+  interceptor:
+    id: "blue_1"
+    type: "interceptor"
+    team: "blue"
+    aircraft: "configs/aircraft/interceptor_drone.yaml"
+    initial_state:
+      position: [25000.0, 25000.0, 3000.0]  # Center of battlespace
+      velocity: 50.0
+      heading: 0.0
+      climb_angle: 0.0
+      throttle: 0.7
+      fuel_fraction: 1.0
+    behavior: "manual"
+    
+  # Multiple targets
+  targets:
+    # High priority fighter
+    - id: "red_fighter"
+      type: "target"
+      team: "red"
+      priority: "high"
+      aircraft: "configs/aircraft/target_basic.yaml"
+      initial_state:
+        position: [35000.0, 35000.0, 4000.0]
+        velocity: 60.0
+        heading: 225.0  # Southwest
+        throttle: 0.8
+      behavior: "orbit"
+      orbit_center: [30000.0, 30000.0, 3500.0]
+      orbit_radius: 2000.0
+      
+    # Medium priority patrol
+    - id: "red_patrol"
+      type: "target"
+      team: "red"
+      priority: "medium"
+      aircraft: "configs/aircraft/target_basic.yaml"
+      initial_state:
+        position: [15000.0, 35000.0, 2000.0]
+        velocity: 40.0
+        heading: 90.0  # East
+        throttle: 0.6
+      behavior: "waypoint"
+      waypoints:
+        - [20000.0, 35000.0, 2000.0]
+        - [25000.0, 40000.0, 2500.0]
+        - [30000.0, 40000.0, 2500.0]
+        - [35000.0, 35000.0, 2000.0]
+        - [35000.0, 30000.0, 2000.0]
+        - [30000.0, 25000.0, 2000.0]
+        - [25000.0, 25000.0, 2000.0]
+        - [20000.0, 30000.0, 2000.0]
+        - [15000.0, 35000.0, 2000.0]  # Loop back
+        
+    # Low priority transport
+    - id: "red_transport"
+      type: "target"
+      team: "red"
+      priority: "low"
+      aircraft: "configs/aircraft/target_basic.yaml"
+      initial_state:
+        position: [10000.0, 10000.0, 5000.0]
+        velocity: 35.0
+        heading: 45.0  # Northeast
+        throttle: 0.5
+      behavior: "waypoint"
+      waypoints:
+        - [40000.0, 40000.0, 5000.0]  # Straight line transit
+        
+  # Success criteria
+  objectives:
+    primary:
+      - type: "prioritized_intercept"
+        order: ["red_fighter", "red_patrol", "red_transport"]
+        range: 100.0
+    secondary:
+      - type: "time_efficiency"
+        max_time: 400.0
+      - type: "fuel_efficiency"
+        min_remaining: 0.3
+        
+  # Termination
+  termination:
+    conditions:
+      - max_time: 600
+      - all_targets_neutralized: true
+      - interceptor_crashed: true

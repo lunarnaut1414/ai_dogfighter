@@ -1,0 +1,70 @@
+# configs/scenarios/single_target.yaml
+scenario:
+  name: "Basic Intercept Training"
+  description: "Single target interception in clear weather"
+  battlespace: "configs/battlespace/default_battlespace.yaml"
+  
+  # Simulation parameters
+  duration: 300  # seconds
+  update_rate: 50  # Hz
+  
+  # Interceptor configuration
+  interceptor:
+    id: "blue_1"
+    type: "interceptor"
+    team: "blue"
+    aircraft: "configs/aircraft/interceptor_drone.yaml"
+    initial_state:
+      position: [5000.0, 5000.0, 2000.0]
+      velocity: 50.0
+      heading: 0.0  # North (degrees, will be converted)
+      climb_angle: 0.0
+      throttle: 0.7
+      fuel_fraction: 1.0
+    behavior: "manual"  # Will be controlled by guidance algorithm
+    
+  # Target aircraft
+  targets:
+    - id: "red_1"
+      type: "target"
+      team: "red"
+      aircraft: "configs/aircraft/target_basic.yaml"
+      initial_state:
+        position: [25000.0, 25000.0, 2500.0]
+        velocity: 40.0
+        heading: 180.0  # South
+        climb_angle: 0.0
+        throttle: 0.6
+        fuel_fraction: 1.0
+      behavior: "waypoint"
+      waypoints:
+        - [25000.0, 20000.0, 2500.0]
+        - [20000.0, 15000.0, 2000.0]
+        - [15000.0, 10000.0, 2000.0]
+        - [10000.0, 5000.0, 1500.0]
+        
+  # Success criteria
+  objectives:
+    primary:
+      - type: "intercept"
+        target_id: "red_1"
+        range: 100.0  # meters
+        time_limit: 300.0  # seconds
+    secondary:
+      - type: "fuel_remaining"
+        min_fraction: 0.2
+      - type: "no_collision"
+        
+  # Termination conditions
+  termination:
+    conditions:
+      - max_time: 300  # seconds
+      - all_targets_neutralized: true
+      - interceptor_crashed: true
+      - interceptor_fuel_empty: true
+      
+  # Data recording
+  recording:
+    enabled: true
+    frequency: 10  # Hz
+    output_file: "data/scenarios/single_target_run.json"
