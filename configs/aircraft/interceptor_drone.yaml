@@ -1,0 +1,44 @@
+# configs/aircraft/interceptor_drone.yaml
+aircraft:
+  name: "Interceptor MQ-X"
+  type: "fixed_wing_3dof"
+  
+  # Mass Properties
+  mass: 150.0  # kg - Small tactical UAV
+  
+  # Aerodynamic Properties  
+  aerodynamics:
+    reference_area: 3.0  # m^2 - Wing area
+    cd0: 0.025          # Parasitic drag coefficient (clean config)
+    k: 0.04             # Induced drag factor (1/(π*e*AR))
+    cl_alpha: 5.5       # Lift curve slope (per radian)
+    cl_max: 1.4         # Maximum lift coefficient
+    
+  # Propulsion
+  propulsion:
+    thrust_max: 600.0   # N - Adequate for 150kg UAV
+    thrust_min: 0.0     # N
+    sfc: 0.00008        # Specific fuel consumption (kg/N/s)
+    
+  # Performance Envelope
+  performance:
+    v_min: 22.0         # Stall speed (m/s)
+    v_max: 80.0         # Max speed (m/s)  
+    v_cruise: 50.0      # Cruise speed (m/s)
+    climb_rate_max: 12.0  # m/s
+    turn_rate_max: 0.5    # rad/s (~30 deg/s)
+    load_factor_max: 4.0  # g's
+    service_ceiling: 12000.0  # meters
+    
+  # Control Limits
+  control:
+    bank_angle_max: 60.0  # degrees
+    bank_rate_max: 90.0   # degrees/second
+    pitch_angle_max: 25.0  # degrees
+    throttle_rate: 0.5     # 1/s (0 to 1 in 2 seconds)
+    
+  # Fuel/Battery
+  fuel:
+    capacity: 25.0      # kg of fuel
+    initial: 25.0       # kg
+    endurance: 7200     # seconds (2 hours nominal)

@@ -1,0 +1,44 @@
+# configs/aircraft/target_basic.yaml
+aircraft:
+  name: "Target Drone"
+  type: "fixed_wing_3dof"
+  
+  # Mass Properties
+  mass: 100.0  # kg - Lighter target drone
+  
+  # Aerodynamic Properties
+  aerodynamics:
+    reference_area: 2.5  # m^2
+    cd0: 0.03           # Higher drag (less efficient)
+    k: 0.045            # Induced drag factor
+    cl_alpha: 5.0       # Lift curve slope
+    cl_max: 1.2         # Lower max CL
+    
+  # Propulsion
+  propulsion:
+    thrust_max: 400.0   # N - Less powerful
+    thrust_min: 0.0     # N
+    sfc: 0.0001         # Higher fuel consumption
+    
+  # Performance Envelope
+  performance:
+    v_min: 20.0         # Stall speed (m/s)
+    v_max: 60.0         # Lower max speed
+    v_cruise: 40.0      # Cruise speed (m/s)
+    climb_rate_max: 8.0   # m/s - Less climb performance
+    turn_rate_max: 0.4    # rad/s
+    load_factor_max: 3.0  # g's - Less maneuverable
+    service_ceiling: 8000.0  # meters - Lower ceiling
+    
+  # Control Limits
+  control:
+    bank_angle_max: 45.0  # degrees - Less aggressive
+    bank_rate_max: 60.0   # degrees/second
+    pitch_angle_max: 20.0  # degrees
+    throttle_rate: 0.3     # Slower throttle response
+    
+  # Fuel/Battery
+  fuel:
+    capacity: 15.0      # kg
+    initial: 15.0       # kg
+    endurance: 5400     # seconds (1.5 hours)
