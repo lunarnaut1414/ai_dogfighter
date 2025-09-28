@@ -2,6 +2,7 @@
 """
 3DOF (Three Degree of Freedom) fixed-wing aircraft dynamics model.
 Point-mass model with flight path angles for trajectory simulation.
+Updated to include pitch control for altitude changes.
 """
 
 import numpy as np
@@ -34,6 +35,7 @@ class AircraftState:
     
     # Control
     bank_angle: float  # φ (phi) - bank angle in radians
+    pitch_angle: float  # θ (theta) - pitch angle in radians (NEW!)
     throttle: float  # Throttle setting [0, 1]
     
     # Energy
@@ -65,6 +67,7 @@ class AircraftState:
             heading=self.heading,
             flight_path_angle=self.flight_path_angle,
             bank_angle=self.bank_angle,
+            pitch_angle=self.pitch_angle,
             throttle=self.throttle,
             fuel_remaining=self.fuel_remaining,
             time=self.time
@@ -87,10 +90,10 @@ class AircraftForces:
 
 class Aircraft3DOF:
     """
-    3DOF fixed-wing aircraft dynamics model.
+    3DOF fixed-wing aircraft dynamics model with pitch control.
     
     Uses point-mass equations with flight path angles.
-    Suitable for trajectory analysis and guidance algorithm testing.
+    Includes pitch control for altitude changes.
     """
     
     def __init__(self, config_file: Optional[str] = None, 
@@ -139,6 +142,7 @@ class Aircraft3DOF:
         self.k = aero['k']  # Induced drag factor
         self.CL_alpha = aero.get('cl_alpha', 5.0)  # Lift curve slope
         self.CL_max = aero['cl_max']  # Maximum lift coefficient
+        self.CL0 = aero.get('cl0', 0.2)  # Zero-angle lift coefficient (NEW!)
         
         # Propulsion
         prop = self.config['propulsion']
@@ -160,6 +164,7 @@ class Aircraft3DOF:
         self.bank_angle_max = np.radians(ctrl['bank_angle_max'])
         self.bank_rate_max = np.radians(ctrl.get('bank_rate_max', 90))
         self.pitch_angle_max = np.radians(ctrl['pitch_angle_max'])
+        self.pitch_rate_max = np.radians(ctrl.get('pitch_rate_max', 30))  # NEW!
         self.throttle_rate = ctrl['throttle_rate']
         
         # Fuel
@@ -176,7 +181,7 @@ class Aircraft3DOF:
         Args:
             position: Initial position [x, y, z] in meters
             velocity: Initial airspeed in m/s
-            heading: Initial heading in radians (0 = North)
+            heading: Initial heading in radians (0 = East)
             flight_path_angle: Initial climb angle in radians
             throttle: Initial throttle setting [0, 1]
             fuel: Initial fuel (kg), defaults to full
@@ -185,11 +190,12 @@ class Aircraft3DOF:
             fuel = self.fuel_initial
             
         self.state = AircraftState(
-            position=position.astype(np.float64),  # Force float64
+            position=position.astype(np.float64),
             velocity=velocity,
             heading=heading,
             flight_path_angle=flight_path_angle,
             bank_angle=0.0,
+            pitch_angle=flight_path_angle,  # Initialize pitch to match flight path
             throttle=throttle,
             fuel_remaining=fuel,
             time=0.0
@@ -199,12 +205,14 @@ class Aircraft3DOF:
         self.state_history = [self.state.copy()]
         
     def set_controls(self, bank_angle: Optional[float] = None,
+                    pitch_angle: Optional[float] = None,  # NEW parameter!
                     throttle: Optional[float] = None):
         """
         Set control inputs.
         
         Args:
             bank_angle: Commanded bank angle in radians
+            pitch_angle: Commanded pitch angle in radians (NEW!)
             throttle: Commanded throttle [0, 1]
         """
         if bank_angle is not None:
@@ -213,59 +221,67 @@ class Aircraft3DOF:
                 bank_angle, -self.bank_angle_max, self.bank_angle_max
             )
             
+        if pitch_angle is not None:
+            # Limit pitch angle
+            self.state.pitch_angle = np.clip(
+                pitch_angle, -self.pitch_angle_max, self.pitch_angle_max
+            )
+            
         if throttle is not None:
             # Limit throttle
             self.state.throttle = np.clip(throttle, 0.0, 1.0)
             
     def calculate_forces(self) -> AircraftForces:
-            """
-            Calculate all forces acting on the aircraft.
+        """
+        Calculate all forces acting on the aircraft.
+        
+        Returns:
+            AircraftForces object with all force components
+        """
+        forces = AircraftForces()
+        
+        # Weight
+        forces.weight = self.mass * 9.81
+        
+        # Thrust
+        forces.thrust = self.thrust_min + (self.thrust_max - self.thrust_min) * self.state.throttle
+        
+        # Dynamic pressure
+        q = 0.5 * self.air_density * self.state.velocity ** 2
+        
+        # Angle of attack (difference between pitch and flight path angle)
+        # This is key for altitude control!
+        alpha = self.state.pitch_angle - self.state.flight_path_angle
+        
+        # Limit angle of attack to prevent stall
+        alpha_max = np.radians(15)  # Typical stall angle
+        alpha = np.clip(alpha, -alpha_max, alpha_max)
+        
+        # Lift coefficient with pitch influence
+        # CL = CL0 + CL_alpha * alpha
+        CL = self.CL0 + self.CL_alpha * alpha
+        
+        # Apply stall model (simple)
+        if abs(alpha) > alpha_max * 0.9:
+            CL *= 0.7  # Stall reduces lift
+            self.mode = FlightMode.STALLED
+        else:
+            self.mode = FlightMode.NORMAL
             
-            Returns:
-                AircraftForces object with lift, drag, thrust, weight
-            """
-            forces = AircraftForces()
-            
-            # Weight
-            forces.weight = self.mass * 9.81
-            
-            # Get true airspeed (accounting for wind)
-            velocity_ground = self.state.get_velocity_vector()
-            velocity_air = velocity_ground - self.wind_vector
-            v_true = np.linalg.norm(velocity_air)
-            
-            # Dynamic pressure
-            q = 0.5 * self.air_density * v_true ** 2
-            
-            # Thrust
-            forces.thrust = self.state.throttle * self.thrust_max
-            
-            # Lift coefficient (simplified - assumes coordinated flight)
-            # In steady flight: L = W/cos(φ)
-            CL = forces.weight * np.abs(np.cos(self.state.bank_angle)) / (q * self.S)
-            
-            # Check for stall
-            if CL > self.CL_max or v_true < self.v_min:
-                CL = self.CL_max * 0.5  # Stalled lift
-                self.mode = FlightMode.STALLED
-            else:
-                self.mode = FlightMode.NORMAL
-                
-            # Limit CL
-            CL = np.clip(CL, 0, self.CL_max)
-            
-            # Lift
-            forces.lift = q * self.S * CL
-            
-            # Drag coefficient (parabolic polar)
-            CD = self.CD0 + self.k * CL ** 2
-            
-            # Drag
-            forces.drag = q * self.S * CD
-            
-            self.forces = forces
-            return forces
-    
+        # Limit CL
+        CL = np.clip(CL, -self.CL_max, self.CL_max)
+        
+        # Lift force
+        forces.lift = q * self.S * CL
+        
+        # Drag coefficient
+        CD = self.CD0 + self.k * CL ** 2
+        
+        # Drag force
+        forces.drag = q * self.S * CD
+        
+        return forces
+        
     def calculate_accelerations(self, forces: AircraftForces) -> Tuple[float, float, float]:
         """
         Calculate accelerations from forces.
@@ -277,14 +293,17 @@ class Aircraft3DOF:
             Tuple of (dV/dt, dγ/dt, dψ/dt)
         """
         # Velocity rate (along flight path)
-        # dV/dt = (T - D)/m - g*sin(γ)
-        dV_dt = (forces.thrust - forces.drag) / self.mass - \
+        # dV/dt = (T*cos(alpha) - D)/m - g*sin(γ)
+        # Account for thrust vector with pitch
+        alpha = self.state.pitch_angle - self.state.flight_path_angle
+        dV_dt = (forces.thrust * np.cos(alpha) - forces.drag) / self.mass - \
                 9.81 * np.sin(self.state.flight_path_angle)
         
-        # Flight path angle rate
-        # dγ/dt = (L*cos(φ) - W*cos(γ))/(m*V)
-        if self.state.velocity > 0.1:  # Avoid division by zero
-            dgamma_dt = (forces.lift * np.cos(self.state.bank_angle) - 
+        # Flight path angle rate - this controls climb/descent
+        # dγ/dt = (L*cos(φ) + T*sin(alpha) - W*cos(γ))/(m*V)
+        if self.state.velocity > 0.1:
+            dgamma_dt = (forces.lift * np.cos(self.state.bank_angle) + 
+                        forces.thrust * np.sin(alpha) -
                         forces.weight * np.cos(self.state.flight_path_angle)) / \
                        (self.mass * self.state.velocity)
         else:
@@ -330,6 +349,7 @@ class Aircraft3DOF:
             
         # Calculate forces
         forces = self.calculate_forces()
+        self.forces = forces
         
         # Calculate accelerations
         dV_dt, dgamma_dt, dpsi_dt = self.calculate_accelerations(forces)
@@ -342,11 +362,11 @@ class Aircraft3DOF:
         # Limit velocity
         self.state.velocity = np.clip(self.state.velocity, 0, self.v_max)
         
-        # Limit flight path angle
+        # Limit flight path angle (it will follow pitch angle due to forces)
         self.state.flight_path_angle = np.clip(
             self.state.flight_path_angle,
-            -self.pitch_angle_max,
-            self.pitch_angle_max
+            -np.radians(30),  # Max dive
+            np.radians(30)    # Max climb
         )
         
         # Normalize heading to [0, 2π]
@@ -403,146 +423,44 @@ class Aircraft3DOF:
         Get current climb rate.
         
         Returns:
-            Climb rate in m/s
+            Climb rate in m/s (positive = climbing)
         """
         return self.state.velocity * np.sin(self.state.flight_path_angle)
     
-    def get_range_rate(self, target_position: np.ndarray) -> float:
+    def get_state_dict(self) -> Dict[str, Any]:
         """
-        Calculate range rate to target (closing velocity).
-        
-        Args:
-            target_position: Target position [x, y, z]
-            
-        Returns:
-            Range rate in m/s (negative = closing)
-        """
-        # Vector to target
-        los_vector = target_position - self.state.position
-        range_to_target = np.linalg.norm(los_vector)
-        
-        if range_to_target < 0.1:
-            return 0.0
-            
-        # Unit vector to target
-        los_unit = los_vector / range_to_target
-        
-        # Project velocity onto LOS
-        velocity_vec = self.state.get_velocity_vector()
-        range_rate = np.dot(velocity_vec, los_unit)
-        
-        return range_rate
-    
-    def get_energy_state(self) -> Dict[str, float]:
-        """
-        Calculate energy state parameters.
+        Get state as dictionary for external use.
         
         Returns:
-            Dictionary with energy metrics
+            Dictionary containing current state
         """
-        ke = self.get_kinetic_energy()
-        pe = self.get_potential_energy()
-        
+        if self.state is None:
+            return {}
+            
         return {
-            'kinetic_energy': ke,
-            'potential_energy': pe,
-            'total_energy': ke + pe,
-            'specific_energy': (ke + pe) / self.mass,  # Energy per unit mass
-            'energy_height': (ke + pe) / (self.mass * 9.81)  # Equivalent altitude
+            'position': self.state.position.copy(),
+            'velocity': self.state.velocity,
+            'heading': self.state.heading,
+            'flight_path_angle': self.state.flight_path_angle,
+            'bank_angle': self.state.bank_angle,
+            'pitch_angle': self.state.pitch_angle,
+            'throttle': self.state.throttle,
+            'fuel_remaining': self.state.fuel_remaining,
+            'time': self.state.time,
+            'mode': self.mode.value,
+            'climb_rate': self.get_climb_rate(),
+            'turn_radius': self.get_turn_radius()
         }
     
-    def get_kinetic_energy(self) -> float:
-        """Calculate kinetic energy in Joules"""
-        return 0.5 * self.mass * self.state.velocity ** 2
-    
-    def get_potential_energy(self) -> float:
-        """Calculate potential energy in Joules"""
-        return self.mass * 9.81 * self.state.position[2]
-    
-    def set_waypoint_commands(self, waypoint: np.ndarray, 
-                             desired_speed: Optional[float] = None) -> Tuple[float, float]:
+    def apply_environmental_effects(self, effects: Dict[str, Any]):
         """
-        Calculate control commands to fly to waypoint.
-        Simple proportional navigation.
+        Apply environmental effects to aircraft.
         
         Args:
-            waypoint: Target position [x, y, z]
-            desired_speed: Desired airspeed (m/s)
-            
-        Returns:
-            Tuple of (bank_angle, throttle) commands
+            effects: Dictionary with wind, turbulence, density, etc.
         """
-        # Vector to waypoint
-        delta = waypoint - self.state.position
-        range_to_wp = np.linalg.norm(delta[:2])  # Horizontal range
-        
-        if range_to_wp < 10:  # Within 10m, consider reached
-            return 0.0, self.state.throttle
-            
-        # Desired heading to waypoint
-        desired_heading = np.arctan2(delta[1], delta[0])
-        
-        # Heading error (with wrapping)
-        heading_error = desired_heading - self.state.heading
-        while heading_error > np.pi:
-            heading_error -= 2 * np.pi
-        while heading_error < -np.pi:
-            heading_error += 2 * np.pi
-            
-        # Bank angle command (proportional control)
-        k_bank = 1.0  # Gain
-        bank_cmd = k_bank * heading_error
-        bank_cmd = np.clip(bank_cmd, -self.bank_angle_max, self.bank_angle_max)
-        
-        # Altitude control via flight path angle
-        altitude_error = waypoint[2] - self.state.position[2]
-        desired_climb_rate = np.clip(altitude_error * 0.1, 
-                                     -self.climb_rate_max, 
-                                     self.climb_rate_max)
-        
-        # Speed control via throttle
-        if desired_speed is None:
-            desired_speed = self.v_cruise
-            
-        speed_error = desired_speed - self.state.velocity
-        throttle_cmd = self.state.throttle + speed_error * 0.01
-        throttle_cmd = np.clip(throttle_cmd, 0, 1)
-        
-        return bank_cmd, throttle_cmd
-    
-    def get_state_vector(self) -> np.ndarray:
-        """
-        Get state as a vector for recording/analysis.
-        
-        Returns:
-            State vector [x, y, z, V, γ, ψ, φ, throttle, fuel]
-        """
-        return np.array([
-            self.state.position[0],
-            self.state.position[1], 
-            self.state.position[2],
-            self.state.velocity,
-            self.state.flight_path_angle,
-            self.state.heading,
-            self.state.bank_angle,
-            self.state.throttle,
-            self.state.fuel_remaining
-        ])
-    
-    def __str__(self) -> str:
-        """String representation of aircraft state"""
-        if self.state is None:
-            return "Aircraft3DOF (uninitialized)"
-            
-        return (f"Aircraft3DOF: Pos=({self.state.position[0]:.0f}, "
-                f"{self.state.position[1]:.0f}, {self.state.position[2]:.0f})m, "
-                f"V={self.state.velocity:.1f}m/s, "
-                f"Heading={np.degrees(self.state.heading):.0f}°, "
-                f"Climb={self.get_climb_rate():.1f}m/s, "
-                f"Mode={self.mode.value}")
-        
-        
-    def apply_wind(self, wind_vector):
-        """Apply wind effects to aircraft"""
-        self.wind = np.array(wind_vector)
-        # Update ground speed vs airspeed calculations
+        if 'wind' in effects:
+            self.wind_vector = np.array(effects['wind'])
+        if 'air_density' in effects:
+            self.air_density = effects['air_density']
+        # Could add turbulence, icing, etc. here
