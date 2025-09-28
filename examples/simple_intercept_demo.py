@@ -245,7 +245,7 @@ def run_simple_intercept():
         position=np.array([10000, 8000, 2500], dtype=float),
         velocity=40.0,
         heading=np.arctan2(-20, 40),  # Moving away initially
-        flight_path_angle=0.0,
+        flight_path_angle=0.255*np.pi/180,
         throttle=0.5
     )
     
