@@ -19,11 +19,14 @@ class ObjectiveType(Enum):
     TIME_LIMIT = "time_limit"
     TIME_EFFICIENCY = "time_efficiency"  # Alias for time_limit
     NO_COLLISION = "no_collision"
+    NO_TERRAIN_COLLISION = "no_terrain_collision"
     AREA_DENIAL = "area_denial"
     ESCORT = "escort"
     RECONNAISSANCE = "reconnaissance"
     PRIORITIZED_INTERCEPT = "prioritized_intercept"
     ALL_TARGETS_NEUTRALIZED = "all_targets_neutralized"
+    MAINTAIN_ALTITUDE = "maintain_altitude"
+    REACH_WAYPOINT = "reach_waypoint"
 
 
 class ObjectiveStatus(Enum):
@@ -77,7 +80,7 @@ class Objective:
         # Try to create enum, but handle unknown types gracefully
         try:
             self.type = ObjectiveType(obj_type)
-        except ValueError:
+        except (ValueError, KeyError):
             print(f"Warning: Unknown objective type '{obj_type}', using as-is")
             self.type = obj_type
             
@@ -92,6 +95,9 @@ class Objective:
         self.message = ""
         self.data = {}
         
+        # Store raw config for subclasses
+        self.config = config
+        
     def start(self, current_time: float):
         """Start tracking this objective"""
         self.start_time = current_time
@@ -101,478 +107,517 @@ class Objective:
         """
         Evaluate objective status.
         Must be implemented by subclasses.
+        
+        Args:
+            asset_manager: Asset manager instance
+            current_time: Current simulation time
+            
+        Returns:
+            ObjectiveResult with current status
         """
-        raise NotImplementedError
+        raise NotImplementedError("Subclasses must implement evaluate()")
         
-    def complete(self, current_time: float, message: str = ""):
-        """Mark objective as completed"""
-        self.completion_time = current_time
-        self.status = ObjectiveStatus.COMPLETED
-        self.progress = 1.0
-        self.message = message or f"{self.description} completed"
-        
-    def fail(self, current_time: float, message: str = ""):
-        """Mark objective as failed"""
-        self.completion_time = current_time
-        self.status = ObjectiveStatus.FAILED
-        self.message = message or f"{self.description} failed"
+    def reset(self):
+        """Reset objective to initial state"""
+        self.status = ObjectiveStatus.PENDING
+        self.progress = 0.0
+        self.start_time = None
+        self.completion_time = None
+        self.message = ""
+        self.data = {}
 
 
 class InterceptObjective(Objective):
-    """Intercept a specific target within range"""
+    """Objective to intercept a specific target"""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.target_id = config.get('target_id', config.get('target'))
-        self.intercept_range = config.get('range', 100.0)  # meters
-        self.time_limit = config.get('time_limit', None)  # seconds
+        self.target_id = config.get('target_id', 'any')
+        self.intercept_range = config.get('range', 50.0)  # meters
+        self.time_limit = config.get('time_limit', float('inf'))
+        self.interceptor_id = config.get('interceptor_id', 'interceptor_1')
+        
+        # Track intercept events
         self.intercept_events = []
         
     def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
         """Check if target has been intercepted"""
         
         # Check time limit
-        if self.time_limit and current_time - self.start_time > self.time_limit:
-            self.fail(current_time, f"Time limit exceeded ({self.time_limit}s)")
-            return ObjectiveResult(ObjectiveStatus.FAILED, 0.0, self.message)
-            
-        # Get interceptor and target
-        interceptor = None
-        target = None
-        
-        for asset_id in asset_manager.assets:
-            # Use get_asset method if available, otherwise handle AssetInfo directly
-            if hasattr(asset_manager, 'get_asset'):
-                asset = asset_manager.get_asset(asset_id)
-                if asset and asset['type'] == 'interceptor':
-                    interceptor = asset
-                elif asset and asset_id == self.target_id:
-                    target = asset
-            else:
-                # Direct AssetInfo access
-                asset_info = asset_manager.assets[asset_id]
-                if asset_info.asset_type.value == 'interceptor':
-                    interceptor = {
-                        'state': {
-                            'position': asset_info.aircraft.state.position,
-                            'fuel_fraction': asset_info.aircraft.state.fuel_remaining / asset_info.aircraft.fuel_capacity
-                        }
-                    }
-                elif asset_id == self.target_id:
-                    target = {
-                        'state': {
-                            'position': asset_info.aircraft.state.position
-                        }
-                    }
-                
-        if not interceptor or not target:
-            return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, 0.0, 
-                                 "Waiting for assets")
-            
-        # Calculate range
-        interceptor_pos = np.array(interceptor['state']['position'])
-        target_pos = np.array(target['state']['position'])
-        range_to_target = np.linalg.norm(target_pos - interceptor_pos)
-        
-        # Update progress based on closing distance
-        initial_range = self.data.get('initial_range')
-        if initial_range is None:
-            initial_range = range_to_target
-            self.data['initial_range'] = initial_range
-            
-        if initial_range > self.intercept_range:
-            self.progress = max(0, 1.0 - (range_to_target - self.intercept_range) / 
-                              (initial_range - self.intercept_range))
-        else:
-            self.progress = 1.0
-            
-        # Check intercept condition
-        if range_to_target <= self.intercept_range:
-            # Record intercept event
-            event = InterceptEvent(
-                time=current_time,
-                interceptor_id=interceptor['id'],
-                target_id=self.target_id,
-                range=range_to_target,
-                relative_velocity=0,  # TODO: Calculate
-                interceptor_fuel=interceptor['state'].get('fuel_fraction', 1.0),
-                success=True
+        if self.start_time and (current_time - self.start_time) > self.time_limit:
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message=f"Time limit exceeded ({self.time_limit}s)",
+                data={'time_elapsed': current_time - self.start_time}
             )
-            self.intercept_events.append(event)
             
-            self.complete(current_time, 
-                         f"Target {self.target_id} intercepted at {range_to_target:.1f}m")
-            return ObjectiveResult(ObjectiveStatus.COMPLETED, 1.0, self.message, 
-                                 {'intercept_event': event})
+        # Get interceptor
+        interceptor_info = asset_manager.get_asset(self.interceptor_id)
+        if not interceptor_info:
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message=f"Interceptor {self.interceptor_id} not found"
+            )
             
-        return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, self.progress,
-                             f"Range to target: {range_to_target:.1f}m")
-
-
-class AllTargetsNeutralizedObjective(Objective):
-    """Neutralize all hostile targets"""
-    
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        self.intercept_range = config.get('range', 100.0)
-        self.time_limit = config.get('time_limit', None)
-        self.neutralized_targets = set()
-        self.total_targets = None
+        interceptor_pos = interceptor_info['state']['position']
         
-    def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
-        """Check if all targets have been neutralized"""
-        
-        # Check time limit
-        if self.time_limit and current_time - self.start_time > self.time_limit:
-            self.fail(current_time, f"Time limit exceeded")
-            return ObjectiveResult(ObjectiveStatus.FAILED, self.progress, self.message)
+        # Check specific target or any target
+        if self.target_id == 'any':
+            # Find closest target
+            all_assets = asset_manager.get_all_assets()
+            min_range = float('inf')
+            closest_target = None
             
-        # Find all hostile targets
-        hostile_targets = []
-        interceptor = None
-        
-        for asset_id in asset_manager.assets:
-            # Use get_asset method if available
-            if hasattr(asset_manager, 'get_asset'):
-                asset = asset_manager.get_asset(asset_id)
-                if asset:
-                    if asset['type'] == 'interceptor':
-                        interceptor = asset
-                    elif asset['type'] == 'target' and asset.get('team') != 'blue':
-                        hostile_targets.append(asset)
-            else:
-                # Direct AssetInfo access
-                asset_info = asset_manager.assets[asset_id]
-                if asset_info.asset_type.value == 'interceptor':
-                    interceptor = {
-                        'state': {
-                            'position': asset_info.aircraft.state.position
-                        },
-                        'id': asset_info.asset_id
-                    }
-                elif asset_info.asset_type.value == 'target' and asset_info.team != 'blue':
-                    hostile_targets.append({
-                        'state': {
-                            'position': asset_info.aircraft.state.position
-                        },
-                        'id': asset_info.asset_id
-                    })
-                
-        if self.total_targets is None:
-            self.total_targets = len(hostile_targets)
-            
-        if not interceptor:
-            return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, 0.0, "No interceptor")
-            
-        # Check each target
-        interceptor_pos = np.array(interceptor['state']['position'])
-        
-        for target in hostile_targets:
-            target_id = target['id']
-            if target_id not in self.neutralized_targets:
-                target_pos = np.array(target['state']['position'])
-                range_to_target = np.linalg.norm(target_pos - interceptor_pos)
-                
-                if range_to_target <= self.intercept_range:
-                    self.neutralized_targets.add(target_id)
+            for asset_id, asset_info in all_assets.items():
+                if asset_info['type'] == 'target':
+                    target_pos = asset_info['state']['position']
+                    range_to_target = np.linalg.norm(target_pos - interceptor_pos)
                     
-        # Update progress
-        if self.total_targets > 0:
-            self.progress = len(self.neutralized_targets) / self.total_targets
+                    if range_to_target < min_range:
+                        min_range = range_to_target
+                        closest_target = asset_id
+                        
+            if closest_target and min_range <= self.intercept_range:
+                # Intercept successful
+                return ObjectiveResult(
+                    status=ObjectiveStatus.COMPLETED,
+                    progress=1.0,
+                    message=f"Target {closest_target} intercepted at {min_range:.1f}m",
+                    data={
+                        'target_id': closest_target,
+                        'intercept_range': min_range,
+                        'time': current_time
+                    }
+                )
+            else:
+                # Still pursuing
+                progress = max(0.0, 1.0 - (min_range / 1000.0)) if min_range < float('inf') else 0.0
+                return ObjectiveResult(
+                    status=ObjectiveStatus.IN_PROGRESS,
+                    progress=progress,
+                    message=f"Pursuing target, range: {min_range:.1f}m" if min_range < float('inf') else "No targets found",
+                    data={'min_range': min_range}
+                )
         else:
-            self.progress = 1.0
+            # Check specific target
+            target_info = asset_manager.get_asset(self.target_id)
             
-        # Check completion
-        if len(self.neutralized_targets) >= self.total_targets:
-            self.complete(current_time, 
-                         f"All {self.total_targets} targets neutralized")
-            return ObjectiveResult(ObjectiveStatus.COMPLETED, 1.0, self.message)
-            
-        return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, self.progress,
-                             f"Neutralized {len(self.neutralized_targets)}/{self.total_targets}")
-
-
-class PrioritizedInterceptObjective(Objective):
-    """Intercept targets in priority order"""
-    
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        self.target_order = config.get('order', [])
-        self.intercept_range = config.get('range', 100.0)
-        self.current_target_index = 0
-        self.intercepted_targets = []
-        
-    def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
-        """Check intercept progress following priority order"""
-        
-        if self.current_target_index >= len(self.target_order):
-            self.complete(current_time, "All priority targets intercepted")
-            return ObjectiveResult(ObjectiveStatus.COMPLETED, 1.0, self.message)
-            
-        current_target = self.target_order[self.current_target_index]
-        
-        # Get interceptor and target
-        interceptor = None
-        target = None
-        
-        for asset_id, asset in asset_manager.assets.items():
-            if asset['type'] == 'interceptor':
-                interceptor = asset
-            elif asset_id == current_target:
-                target = asset
+            if not target_info:
+                # Target already destroyed/removed
+                return ObjectiveResult(
+                    status=ObjectiveStatus.COMPLETED,
+                    progress=1.0,
+                    message=f"Target {self.target_id} neutralized",
+                    data={'target_id': self.target_id, 'time': current_time}
+                )
                 
-        if not interceptor or not target:
-            return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, self.progress,
-                                 f"Seeking target {current_target}")
+            target_pos = target_info['state']['position']
+            range_to_target = np.linalg.norm(target_pos - interceptor_pos)
             
-        # Check range to current target
-        interceptor_pos = np.array(interceptor['state']['position'])
-        target_pos = np.array(target['state']['position'])
-        range_to_target = np.linalg.norm(target_pos - interceptor_pos)
-        
-        if range_to_target <= self.intercept_range:
-            self.intercepted_targets.append(current_target)
-            self.current_target_index += 1
-            self.progress = self.current_target_index / len(self.target_order)
-            
-        return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, self.progress,
-                             f"Target {self.current_target_index + 1}/{len(self.target_order)}: "
-                             f"{current_target} at {range_to_target:.1f}m")
+            if range_to_target <= self.intercept_range:
+                # Intercept successful
+                return ObjectiveResult(
+                    status=ObjectiveStatus.COMPLETED,
+                    progress=1.0,
+                    message=f"Target {self.target_id} intercepted at {range_to_target:.1f}m",
+                    data={
+                        'target_id': self.target_id,
+                        'intercept_range': range_to_target,
+                        'time': current_time
+                    }
+                )
+            else:
+                # Still pursuing
+                progress = max(0.0, 1.0 - (range_to_target / 1000.0))
+                return ObjectiveResult(
+                    status=ObjectiveStatus.IN_PROGRESS,
+                    progress=progress,
+                    message=f"Pursuing {self.target_id}, range: {range_to_target:.1f}m",
+                    data={'range': range_to_target}
+                )
 
 
 class FuelEfficiencyObjective(Objective):
-    """Maintain minimum fuel reserves"""
+    """Objective to maintain fuel above threshold"""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.min_fuel_fraction = config.get('min_remaining', 0.2)
-        self.min_fraction = config.get('min_fraction', 0.2)  # Alternative key
-        if self.min_fraction != 0.2:
-            self.min_fuel_fraction = self.min_fraction
-            
-    def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
-        """Check fuel efficiency"""
+        self.min_fuel_fraction = config.get('min_fraction', 0.2)
+        self.interceptor_id = config.get('interceptor_id', 'interceptor_1')
+        self.check_at_end = config.get('check_at_end', True)
         
-        # Find interceptor
-        interceptor = None
-        for asset_id, asset in asset_manager.assets.items():
-            if asset['type'] == 'interceptor':
-                interceptor = asset
-                break
-                
-        if not interceptor:
-            return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, 0.0, "No interceptor")
+    def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
+        """Check fuel remaining"""
+        
+        interceptor_info = asset_manager.get_asset(self.interceptor_id)
+        if not interceptor_info:
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message=f"Interceptor {self.interceptor_id} not found"
+            )
             
-        fuel_fraction = interceptor['state'].get('fuel_fraction', 1.0)
-        self.progress = min(1.0, fuel_fraction / self.min_fuel_fraction)
+        aircraft = interceptor_info['aircraft']
+        fuel_fraction = aircraft.state.fuel_remaining / aircraft.fuel_capacity
         
         if fuel_fraction < self.min_fuel_fraction:
-            self.fail(current_time, 
-                     f"Fuel below minimum ({fuel_fraction:.1%} < {self.min_fuel_fraction:.1%})")
-            return ObjectiveResult(ObjectiveStatus.FAILED, self.progress, self.message)
-            
-        return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, self.progress,
-                             f"Fuel: {fuel_fraction:.1%}")
+            if not self.check_at_end:
+                # Fail immediately if fuel drops below threshold
+                return ObjectiveResult(
+                    status=ObjectiveStatus.FAILED,
+                    progress=fuel_fraction / self.min_fuel_fraction,
+                    message=f"Fuel below minimum: {fuel_fraction:.1%} < {self.min_fuel_fraction:.1%}",
+                    data={'fuel_fraction': fuel_fraction}
+                )
+                
+        # Still meeting requirement
+        progress = min(1.0, fuel_fraction / self.min_fuel_fraction)
+        return ObjectiveResult(
+            status=ObjectiveStatus.IN_PROGRESS,
+            progress=progress,
+            message=f"Fuel remaining: {fuel_fraction:.1%}",
+            data={'fuel_fraction': fuel_fraction}
+        )
 
 
-class TimeLimitObjective(Objective):
-    """Complete mission within time limit"""
+class TimeEfficiencyObjective(Objective):
+    """Objective to complete mission within time limit"""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.max_time = config.get('max_time', 300.0)
+        self.max_time = config.get('max_time', 300.0)  # seconds
+        self.time_limit = config.get('time_limit', self.max_time)
         
     def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
         """Check time limit"""
         
-        elapsed = current_time - self.start_time
-        self.progress = min(1.0, elapsed / self.max_time)
-        
-        if elapsed >= self.max_time:
-            self.fail(current_time, f"Time limit exceeded ({self.max_time}s)")
-            return ObjectiveResult(ObjectiveStatus.FAILED, 1.0, self.message)
+        if not self.start_time:
+            self.start_time = current_time
             
-        return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, self.progress,
-                             f"Time: {elapsed:.1f}/{self.max_time}s")
+        elapsed = current_time - self.start_time
+        
+        if elapsed > self.time_limit:
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=1.0,
+                message=f"Time limit exceeded: {elapsed:.1f}s > {self.time_limit:.1f}s",
+                data={'elapsed_time': elapsed}
+            )
+            
+        progress = elapsed / self.time_limit
+        return ObjectiveResult(
+            status=ObjectiveStatus.IN_PROGRESS,
+            progress=progress,
+            message=f"Time elapsed: {elapsed:.1f}s / {self.time_limit:.1f}s",
+            data={'elapsed_time': elapsed, 'remaining_time': self.time_limit - elapsed}
+        )
 
 
-class NoCollisionObjective(Objective):
-    """Avoid terrain and aircraft collisions"""
+class SurvivalObjective(Objective):
+    """Objective for interceptor to survive"""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.min_altitude = config.get('min_altitude', 50.0)
-        self.min_separation = config.get('min_separation', 50.0)
+        self.interceptor_id = config.get('interceptor_id', 'interceptor_1')
+        self.duration = config.get('duration', None)  # Survive for specific duration
         
     def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
-        """Check for collisions"""
+        """Check if interceptor is still alive"""
         
-        # Check terrain collisions
-        for asset_id, asset in asset_manager.assets.items():
-            pos = asset['state']['position']
+        interceptor_info = asset_manager.get_asset(self.interceptor_id)
+        
+        if not interceptor_info:
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message=f"Interceptor {self.interceptor_id} destroyed",
+                data={'time_of_loss': current_time}
+            )
             
-            # Check altitude
-            if pos[2] < self.min_altitude:
-                self.fail(current_time, 
-                         f"{asset_id} below minimum altitude ({pos[2]:.1f}m)")
-                return ObjectiveResult(ObjectiveStatus.FAILED, 0.0, self.message)
-                
-        # Check aircraft separation
-        assets = list(asset_manager.assets.values())
-        for i in range(len(assets)):
-            for j in range(i + 1, len(assets)):
-                pos1 = np.array(assets[i]['state']['position'])
-                pos2 = np.array(assets[j]['state']['position'])
-                separation = np.linalg.norm(pos1 - pos2)
-                
-                if separation < self.min_separation:
-                    self.fail(current_time,
-                             f"Collision between {assets[i]['id']} and {assets[j]['id']}")
-                    return ObjectiveResult(ObjectiveStatus.FAILED, 0.0, self.message)
-                    
-        self.progress = 1.0  # Binary objective
-        return ObjectiveResult(ObjectiveStatus.IN_PROGRESS, 1.0, "No collisions")
+        # Check if duration requirement met
+        if self.duration and self.start_time:
+            elapsed = current_time - self.start_time
+            if elapsed >= self.duration:
+                return ObjectiveResult(
+                    status=ObjectiveStatus.COMPLETED,
+                    progress=1.0,
+                    message=f"Survived for {self.duration}s",
+                    data={'survival_time': elapsed}
+                )
+            else:
+                progress = elapsed / self.duration
+                return ObjectiveResult(
+                    status=ObjectiveStatus.IN_PROGRESS,
+                    progress=progress,
+                    message=f"Surviving: {elapsed:.1f}s / {self.duration}s",
+                    data={'elapsed': elapsed}
+                )
+        else:
+            # Just need to stay alive
+            return ObjectiveResult(
+                status=ObjectiveStatus.IN_PROGRESS,
+                progress=1.0,
+                message="Interceptor operational",
+                data={'time': current_time}
+            )
 
 
-class ObjectiveManager:
-    """Manages all objectives for a scenario"""
+class NoCollisionObjective(Objective):
+    """Objective to avoid collisions"""
     
-    def __init__(self):
-        self.objectives: List[Objective] = []
-        self.primary_objectives: List[Objective] = []
-        self.secondary_objectives: List[Objective] = []
-        self.completed_objectives: List[Objective] = []
-        self.failed_objectives: List[Objective] = []
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.interceptor_id = config.get('interceptor_id', 'interceptor_1')
+        self.min_separation = config.get('min_separation', 50.0)  # meters
+        self.check_terrain = config.get('check_terrain', True)
+        self.terrain_margin = config.get('terrain_margin', 100.0)  # meters above terrain
         
-    def add_objective(self, config: Dict[str, Any], primary: bool = True):
-        """
-        Add an objective from configuration.
+        # Track near-misses
+        self.near_misses = []
+        self.collisions = []
         
-        Args:
-            config: Objective configuration
-            primary: Whether this is a primary objective
-        """
-        obj_type = config.get('type')
+    def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
+        """Check for collisions or near-misses"""
         
-        # Handle type aliases
-        if obj_type == 'fuel_remaining':
-            obj_type = 'fuel_efficiency'
-        elif obj_type == 'time_efficiency':
-            obj_type = 'time_limit'
-        
-        # Create appropriate objective instance
-        if obj_type == 'intercept':
-            obj = InterceptObjective(config)
-        elif obj_type == 'all_targets_neutralized':
-            obj = AllTargetsNeutralizedObjective(config)
-        elif obj_type == 'prioritized_intercept':
-            obj = PrioritizedInterceptObjective(config)
-        elif obj_type in ['fuel_efficiency', 'fuel_remaining']:
-            obj = FuelEfficiencyObjective(config)
-        elif obj_type in ['time_efficiency', 'time_limit']:
-            obj = TimeLimitObjective(config)
-        elif obj_type == 'no_collision':
-            obj = NoCollisionObjective(config)
-        else:
-            # Skip unknown objective types with warning
-            print(f"Warning: Unknown objective type '{obj_type}', skipping")
-            return
+        interceptor_info = asset_manager.get_asset(self.interceptor_id)
+        if not interceptor_info:
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message="Interceptor lost"
+            )
             
-        self.objectives.append(obj)
+        interceptor_pos = interceptor_info['state']['position']
         
-        if primary:
-            self.primary_objectives.append(obj)
-        else:
-            self.secondary_objectives.append(obj)
+        # Check terrain collision
+        if self.check_terrain:
+            altitude = interceptor_pos[2]
             
-    def start_all(self, current_time: float):
-        """Start tracking all objectives"""
-        for obj in self.objectives:
-            obj.start(current_time)
+            # Get terrain height (simplified - should query battlespace)
+            terrain_height = 0.0  # Would get from battlespace.get_terrain_height()
             
-    def evaluate_all(self, asset_manager, current_time: float) -> Dict[str, Any]:
-        """
-        Evaluate all objectives and return status.
+            height_above_terrain = altitude - terrain_height
+            
+            if height_above_terrain < 0:
+                self.collisions.append({
+                    'type': 'terrain',
+                    'time': current_time,
+                    'position': interceptor_pos.copy()
+                })
+                return ObjectiveResult(
+                    status=ObjectiveStatus.FAILED,
+                    progress=0.0,
+                    message="Terrain collision",
+                    data={'collision_type': 'terrain', 'position': interceptor_pos}
+                )
+            elif height_above_terrain < self.terrain_margin:
+                # Near terrain - warning
+                self.near_misses.append({
+                    'type': 'terrain',
+                    'time': current_time,
+                    'clearance': height_above_terrain
+                })
+                
+        # Check aircraft collisions
+        all_assets = asset_manager.get_all_assets()
+        min_distance = float('inf')
+        closest_aircraft = None
         
-        Returns:
-            Dictionary with overall status and individual objective results
-        """
-        results = {
-            'primary': [],
-            'secondary': [],
-            'all_completed': False,
-            'primary_completed': False,
-            'any_failed': False,
-            'overall_progress': 0.0
-        }
-        
-        total_weight = 0.0
-        weighted_progress = 0.0
-        
-        for obj in self.objectives:
-            if obj.status in [ObjectiveStatus.COMPLETED, ObjectiveStatus.FAILED]:
+        for asset_id, asset_info in all_assets.items():
+            if asset_id == self.interceptor_id:
                 continue
                 
-            result = obj.evaluate(asset_manager, current_time)
+            other_pos = asset_info['state']['position']
+            distance = np.linalg.norm(other_pos - interceptor_pos)
             
-            # Update objective state
-            if result.status == ObjectiveStatus.COMPLETED:
-                obj.status = ObjectiveStatus.COMPLETED
-                obj.progress = 1.0
-                self.completed_objectives.append(obj)
-            elif result.status == ObjectiveStatus.FAILED:
-                obj.status = ObjectiveStatus.FAILED
-                self.failed_objectives.append(obj)
-                if obj.required:
-                    results['any_failed'] = True
-                    
-            # Track progress
-            total_weight += obj.weight
-            weighted_progress += obj.progress * obj.weight
-            
-            # Add to results
-            obj_result = {
-                'description': obj.description,
-                'status': obj.status.value,
-                'progress': obj.progress,
-                'required': obj.required,
-                'message': result.message
-            }
-            
-            if obj in self.primary_objectives:
-                results['primary'].append(obj_result)
-            else:
-                results['secondary'].append(obj_result)
+            if distance < min_distance:
+                min_distance = distance
+                closest_aircraft = asset_id
                 
-        # Calculate overall progress
-        if total_weight > 0:
-            results['overall_progress'] = weighted_progress / total_weight
+            if distance < self.min_separation:
+                # Near-miss or collision
+                if distance < 10.0:  # Actual collision threshold
+                    self.collisions.append({
+                        'type': 'aircraft',
+                        'other_id': asset_id,
+                        'time': current_time,
+                        'distance': distance
+                    })
+                    return ObjectiveResult(
+                        status=ObjectiveStatus.FAILED,
+                        progress=0.0,
+                        message=f"Collision with {asset_id}",
+                        data={'collision_with': asset_id, 'distance': distance}
+                    )
+                else:
+                    self.near_misses.append({
+                        'type': 'aircraft',
+                        'other_id': asset_id,
+                        'time': current_time,
+                        'distance': distance
+                    })
+                    
+        # No collisions
+        safety_margin = min_distance / self.min_separation if min_distance < float('inf') else 1.0
+        return ObjectiveResult(
+            status=ObjectiveStatus.IN_PROGRESS,
+            progress=min(1.0, safety_margin),
+            message=f"Clear, min separation: {min_distance:.1f}m",
+            data={
+                'min_distance': min_distance,
+                'closest_aircraft': closest_aircraft,
+                'near_misses': len(self.near_misses)
+            }
+        )
+
+
+class ReachWaypointObjective(Objective):
+    """Objective to reach specific waypoint(s)"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.waypoints = [np.array(wp) for wp in config.get('waypoints', [])]
+        self.tolerance = config.get('tolerance', 100.0)  # meters
+        self.interceptor_id = config.get('interceptor_id', 'interceptor_1')
+        self.require_all = config.get('require_all', True)
+        
+        self.current_waypoint_idx = 0
+        self.reached_waypoints = []
+        
+    def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
+        """Check if waypoints have been reached"""
+        
+        if not self.waypoints:
+            return ObjectiveResult(
+                status=ObjectiveStatus.COMPLETED,
+                progress=1.0,
+                message="No waypoints defined"
+            )
             
-        # Check completion
-        primary_complete = all(obj.status == ObjectiveStatus.COMPLETED 
-                              for obj in self.primary_objectives if obj.required)
-        all_complete = all(obj.status == ObjectiveStatus.COMPLETED 
-                          for obj in self.objectives if obj.required)
-                          
-        results['primary_completed'] = primary_complete
-        results['all_completed'] = all_complete
+        interceptor_info = asset_manager.get_asset(self.interceptor_id)
+        if not interceptor_info:
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message="Interceptor not found"
+            )
+            
+        interceptor_pos = interceptor_info['state']['position']
         
-        return results
+        # Check current waypoint
+        if self.current_waypoint_idx < len(self.waypoints):
+            current_wp = self.waypoints[self.current_waypoint_idx]
+            distance = np.linalg.norm(interceptor_pos - current_wp)
+            
+            if distance <= self.tolerance:
+                # Waypoint reached
+                self.reached_waypoints.append(self.current_waypoint_idx)
+                self.current_waypoint_idx += 1
+                
+                if self.current_waypoint_idx >= len(self.waypoints):
+                    # All waypoints reached
+                    return ObjectiveResult(
+                        status=ObjectiveStatus.COMPLETED,
+                        progress=1.0,
+                        message=f"All {len(self.waypoints)} waypoints reached",
+                        data={'waypoints_reached': len(self.reached_waypoints)}
+                    )
+                    
+        # Still in progress
+        if self.current_waypoint_idx < len(self.waypoints):
+            current_wp = self.waypoints[self.current_waypoint_idx]
+            distance = np.linalg.norm(interceptor_pos - current_wp)
+            
+            progress = len(self.reached_waypoints) / len(self.waypoints)
+            # Add partial progress for current waypoint
+            progress += (1.0 - min(1.0, distance / 1000.0)) / len(self.waypoints)
+            
+            return ObjectiveResult(
+                status=ObjectiveStatus.IN_PROGRESS,
+                progress=progress,
+                message=f"Waypoint {self.current_waypoint_idx + 1}/{len(self.waypoints)}, "
+                        f"distance: {distance:.1f}m",
+                data={
+                    'current_waypoint': self.current_waypoint_idx,
+                    'distance_to_waypoint': distance,
+                    'waypoints_reached': len(self.reached_waypoints)
+                }
+            )
+        else:
+            # All waypoints reached
+            return ObjectiveResult(
+                status=ObjectiveStatus.COMPLETED,
+                progress=1.0,
+                message=f"All waypoints reached",
+                data={'waypoints_reached': len(self.reached_waypoints)}
+            )
+
+
+class MaintainAltitudeObjective(Objective):
+    """Objective to maintain altitude within bounds"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.min_altitude = config.get('min_altitude', 500.0)  # meters
+        self.max_altitude = config.get('max_altitude', 5000.0)  # meters
+        self.interceptor_id = config.get('interceptor_id', 'interceptor_1')
         
-    def get_intercept_events(self) -> List[InterceptEvent]:
-        """Get all intercept events from objectives"""
-        events = []
-        for obj in self.objectives:
-            if isinstance(obj, InterceptObjective):
-                events.extend(obj.intercept_events)
-        return events
+        # Track violations
+        self.violations = []
         
-    def get_summary(self) -> Dict[str, Any]:
-        """Get summary of objective status"""
-        return {
-            'total': len(self.objectives),
-            'completed': len(self.completed_objectives),
-            'failed': len(self.failed_objectives),
-            'in_progress': len(self.objectives) - len(self.completed_objectives) - len(self.failed_objectives),
-            'completion_rate': len(self.completed_objectives) / len(self.objectives) if self.objectives else 0
-        }
+    def evaluate(self, asset_manager, current_time: float) -> ObjectiveResult:
+        """Check altitude constraints"""
+        
+        interceptor_info = asset_manager.get_asset(self.interceptor_id)
+        if not interceptor_info:
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message="Interceptor not found"
+            )
+            
+        altitude = interceptor_info['state']['position'][2]
+        
+        if altitude < self.min_altitude:
+            self.violations.append({
+                'type': 'too_low',
+                'altitude': altitude,
+                'time': current_time
+            })
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message=f"Altitude too low: {altitude:.1f}m < {self.min_altitude:.1f}m",
+                data={'altitude': altitude, 'violation': 'too_low'}
+            )
+        elif altitude > self.max_altitude:
+            self.violations.append({
+                'type': 'too_high',
+                'altitude': altitude,
+                'time': current_time
+            })
+            return ObjectiveResult(
+                status=ObjectiveStatus.FAILED,
+                progress=0.0,
+                message=f"Altitude too high: {altitude:.1f}m > {self.max_altitude:.1f}m",
+                data={'altitude': altitude, 'violation': 'too_high'}
+            )
+        else:
+            # Within bounds - calculate how centered we are
+            altitude_range = self.max_altitude - self.min_altitude
+            center = (self.max_altitude + self.min_altitude) / 2
+            deviation = abs(altitude - center) / (altitude_range / 2)
+            progress = 1.0 - deviation
+            
+            return ObjectiveResult(
+                status=ObjectiveStatus.IN_PROGRESS,
+                progress=progress,
+                message=f"Altitude OK: {altitude:.1f}m",
+                data={
+                    'altitude': altitude,
+                    'margin_low': altitude - self.min_altitude,
+                    'margin_high': self.max_altitude - altitude
+                }
+            )
