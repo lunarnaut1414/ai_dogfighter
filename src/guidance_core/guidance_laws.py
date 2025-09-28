@@ -1,714 +1,665 @@
+# src/guidance_core/guidance_laws.py
 """
-Guidance laws for autonomous interceptor.
-Implements various pursuit and intercept algorithms.
+Core guidance law implementations for interceptor.
+Includes Pure Pursuit, Proportional Navigation variants, Optimal Guidance, and MPC.
+All algorithms are platform-agnostic (pure math, no hardware dependencies).
 """
 
 import numpy as np
-from typing import Dict, Tuple, Optional, Any
-from enum import Enum
+from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
-
-
-class GuidanceMode(Enum):
-    """Guidance algorithm modes"""
-    PURE_PURSUIT = "pure_pursuit"
-    LEAD_PURSUIT = "lead_pursuit"
-    PROPORTIONAL_NAVIGATION = "proportional_navigation"
-    AUGMENTED_PN = "augmented_pn"
-    OPTIMAL_GUIDANCE = "optimal_guidance"
-    PREDICTIVE_GUIDANCE = "predictive_guidance"
+import warnings
 
 
 @dataclass
 class GuidanceCommand:
-    """Guidance command output"""
-    commanded_heading: float  # radians
-    commanded_altitude: float  # meters
-    commanded_velocity: float  # m/s
-    commanded_throttle: float  # 0-1
-    target_id: Optional[str] = None
+    """Output command from guidance law"""
+    acceleration_command: np.ndarray  # [ax, ay, az] in m/s²
+    heading_rate: float  # rad/s
+    flight_path_rate: float  # rad/s
+    throttle_command: float  # 0-1
+    guidance_mode: str
+    time_to_go: Optional[float] = None
+    predicted_miss_distance: Optional[float] = None
     confidence: float = 1.0
-    mode: Optional[str] = None
 
 
 class GuidanceLaw:
-    """Base class for guidance laws"""
+    """Base class for all guidance laws"""
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict] = None):
         """
-        Initialize guidance law.
+        Initialize guidance law with configuration.
         
         Args:
             config: Configuration parameters
         """
         self.config = config or {}
-        self.last_los_rate = 0.0
-        self.last_time = None
+        self.name = "base"
         
-    def compute(self, 
-                interceptor_state: Dict[str, Any],
-                target_state: Dict[str, Any],
-                dt: float = 0.02) -> GuidanceCommand:
+    def compute(self, own_state: Dict, target_state: Dict, dt: float) -> GuidanceCommand:
         """
-        Compute guidance commands.
+        Compute guidance command.
         Must be implemented by subclasses.
         """
         raise NotImplementedError
-        
-    def reset(self):
-        """Reset internal state"""
-        self.last_los_rate = 0.0
-        self.last_time = None
 
 
 class PurePursuit(GuidanceLaw):
     """
-    Pure pursuit guidance - always point at target.
-    Simplest guidance law, good for slow targets.
+    Pure Pursuit guidance law.
+    Simple but robust, good for testing and fallback.
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict] = None):
         super().__init__(config)
-        self.look_ahead_time = config.get('look_ahead_time', 0.0) if config else 0.0
+        self.name = "pure_pursuit"
+        self.look_ahead_time = config.get('look_ahead_time', 2.0) if config else 2.0
         
-    def compute(self,
-                interceptor_state: Dict[str, Any],
-                target_state: Dict[str, Any],
-                dt: float = 0.02) -> GuidanceCommand:
+    def compute(self, own_state: Dict, target_state: Dict, dt: float) -> GuidanceCommand:
         """
         Compute pure pursuit guidance.
         
         Args:
-            interceptor_state: Current interceptor state
-            target_state: Current target state
+            own_state: Own aircraft state
+            target_state: Target aircraft state
             dt: Time step
             
         Returns:
             Guidance command
         """
-        # Extract positions
-        int_pos = np.array(interceptor_state['position'])
-        tgt_pos = np.array(target_state['position'])
-        
-        # Look ahead if configured
-        if self.look_ahead_time > 0 and 'velocity_vector' in target_state:
-            tgt_vel = np.array(target_state['velocity_vector'])
-            tgt_pos = tgt_pos + tgt_vel * self.look_ahead_time
-            
-        # Calculate line of sight vector
-        los_vector = tgt_pos - int_pos
-        range_to_target = np.linalg.norm(los_vector)
-        
-        if range_to_target < 0.1:  # Avoid division by zero
-            return GuidanceCommand(
-                commanded_heading=interceptor_state.get('heading', 0),
-                commanded_altitude=int_pos[2],
-                commanded_velocity=interceptor_state.get('velocity', 50),
-                commanded_throttle=0.5
-            )
-            
-        # Calculate desired heading (2D)
-        desired_heading = np.arctan2(los_vector[1], los_vector[0])
-        
-        # Calculate desired altitude
-        desired_altitude = tgt_pos[2]
-        
-        # Speed control based on range
-        if range_to_target > 5000:
-            commanded_throttle = 1.0
-        elif range_to_target > 1000:
-            commanded_throttle = 0.8
-        else:
-            commanded_throttle = 0.6
-            
-        desired_velocity = interceptor_state.get('max_velocity', 80) * commanded_throttle
-        
-        return GuidanceCommand(
-            commanded_heading=desired_heading,
-            commanded_altitude=desired_altitude,
-            commanded_velocity=desired_velocity,
-            commanded_throttle=commanded_throttle,
-            mode="pure_pursuit"
-        )
-
-
-class LeadPursuit(GuidanceLaw):
-    """
-    Lead pursuit guidance - aim ahead of target.
-    Better for moving targets.
-    """
-    
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__(config)
-        self.lead_constant = config.get('lead_constant', 1.0) if config else 1.0
-        
-    def compute(self,
-                interceptor_state: Dict[str, Any],
-                target_state: Dict[str, Any],
-                dt: float = 0.02) -> GuidanceCommand:
-        """
-        Compute lead pursuit guidance.
-        """
         # Extract states
-        int_pos = np.array(interceptor_state['position'])
-        tgt_pos = np.array(target_state['position'])
-        int_vel = np.array(interceptor_state.get('velocity_vector', [0, 0, 0]))
-        tgt_vel = np.array(target_state.get('velocity_vector', [0, 0, 0]))
-        
-        # Calculate range and closing velocity
-        los_vector = tgt_pos - int_pos
-        range_to_target = np.linalg.norm(los_vector)
-        
-        if range_to_target < 0.1:
-            return GuidanceCommand(
-                commanded_heading=interceptor_state.get('heading', 0),
-                commanded_altitude=int_pos[2],
-                commanded_velocity=interceptor_state.get('velocity', 50),
-                commanded_throttle=0.5
-            )
-            
-        los_unit = los_vector / range_to_target
-        closing_velocity = -np.dot(los_unit, int_vel - tgt_vel)
-        
-        # Estimate time to intercept
-        if closing_velocity > 1.0:
-            time_to_go = range_to_target / closing_velocity
-        else:
-            time_to_go = 100.0  # Large value if not closing
-            
-        # Limit lead time
-        lead_time = min(time_to_go * self.lead_constant, 10.0)
+        own_pos = np.array(own_state['position'])
+        own_vel = np.array(own_state['velocity'])
+        target_pos = np.array(target_state['position'])
+        target_vel = np.array(target_state.get('velocity', [0, 0, 0]))
         
         # Predict target position
-        predicted_pos = tgt_pos + tgt_vel * lead_time
+        target_pred = target_pos + target_vel * self.look_ahead_time
         
-        # Calculate heading to predicted position
-        lead_vector = predicted_pos - int_pos
-        desired_heading = np.arctan2(lead_vector[1], lead_vector[0])
+        # Compute pursuit vector
+        pursuit_vector = target_pred - own_pos
+        range_to_target = np.linalg.norm(pursuit_vector)
         
-        # Altitude and speed control
-        desired_altitude = predicted_pos[2]
-        
-        if range_to_target > 3000:
-            commanded_throttle = 1.0
-        elif range_to_target > 500:
-            commanded_throttle = 0.85
-        else:
-            commanded_throttle = 0.7
+        if range_to_target < 1.0:  # Very close
+            return GuidanceCommand(
+                acceleration_command=np.zeros(3),
+                heading_rate=0.0,
+                flight_path_rate=0.0,
+                throttle_command=0.5,
+                guidance_mode=self.name,
+                time_to_go=0.0,
+                predicted_miss_distance=range_to_target
+            )
             
-        desired_velocity = interceptor_state.get('max_velocity', 80) * commanded_throttle
+        # Normalize pursuit direction
+        pursuit_dir = pursuit_vector / range_to_target
         
+        # Compute desired velocity
+        own_speed = np.linalg.norm(own_vel)
+        desired_vel = pursuit_dir * own_speed
+        
+        # Compute acceleration command
+        accel_cmd = (desired_vel - own_vel) / dt
+        accel_cmd = np.clip(accel_cmd, -30, 30)  # Limit to 3g
+        
+        # Convert to heading and flight path angle rates
+        heading_rate = self._compute_heading_rate(own_vel, desired_vel)
+        flight_path_rate = self._compute_flight_path_rate(own_vel, desired_vel)
+        
+        # Simple throttle control
+        closing_rate = np.dot(own_vel - target_vel, pursuit_dir)
+        if closing_rate < 0:  # Opening
+            throttle = 1.0
+        else:
+            throttle = 0.7
+            
         return GuidanceCommand(
-            commanded_heading=desired_heading,
-            commanded_altitude=desired_altitude,
-            commanded_velocity=desired_velocity,
-            commanded_throttle=commanded_throttle,
-            mode="lead_pursuit"
+            acceleration_command=accel_cmd,
+            heading_rate=heading_rate,
+            flight_path_rate=flight_path_rate,
+            throttle_command=throttle,
+            guidance_mode=self.name,
+            time_to_go=range_to_target / max(closing_rate, 1.0),
+            predicted_miss_distance=range_to_target * 0.1  # Simple estimate
         )
+        
+    def _compute_heading_rate(self, current_vel: np.ndarray, desired_vel: np.ndarray) -> float:
+        """Compute heading rate command"""
+        # Project onto horizontal plane
+        current_horizontal = current_vel[:2]
+        desired_horizontal = desired_vel[:2]
+        
+        if np.linalg.norm(current_horizontal) < 1.0:
+            return 0.0
+            
+        # Compute angle difference
+        current_heading = np.arctan2(current_horizontal[1], current_horizontal[0])
+        desired_heading = np.arctan2(desired_horizontal[1], desired_horizontal[0])
+        
+        # Wrap angle difference
+        heading_error = desired_heading - current_heading
+        heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
+        
+        # P controller for heading rate
+        return np.clip(heading_error * 2.0, -1.0, 1.0)  # rad/s
+        
+    def _compute_flight_path_rate(self, current_vel: np.ndarray, desired_vel: np.ndarray) -> float:
+        """Compute flight path angle rate command"""
+        current_speed = np.linalg.norm(current_vel)
+        desired_speed = np.linalg.norm(desired_vel)
+        
+        if current_speed < 1.0 or desired_speed < 1.0:
+            return 0.0
+            
+        current_fpa = np.arcsin(-current_vel[2] / current_speed)
+        desired_fpa = np.arcsin(-desired_vel[2] / desired_speed)
+        
+        fpa_error = desired_fpa - current_fpa
+        return np.clip(fpa_error * 2.0, -0.5, 0.5)  # rad/s
 
 
 class ProportionalNavigation(GuidanceLaw):
     """
     Proportional Navigation (PN) guidance law.
-    Commands acceleration proportional to line-of-sight rate.
-    Most common missile guidance law.
+    Classic missile guidance algorithm.
     """
     
-    def __init__(self, navigation_gain: float = 3.0, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict] = None):
         super().__init__(config)
-        self.N = navigation_gain  # Navigation constant (typically 3-5)
-        self.last_los_angle = None
-        self.los_rate_filter = None
+        self.name = "proportional_navigation"
+        self.N = config.get('navigation_gain', 3.0) if config else 3.0
+        self.previous_los = None
         
-    def compute(self,
-                interceptor_state: Dict[str, Any],
-                target_state: Dict[str, Any],
-                dt: float = 0.02) -> GuidanceCommand:
+    def compute(self, own_state: Dict, target_state: Dict, dt: float) -> GuidanceCommand:
         """
-        Compute proportional navigation guidance.
+        Compute PN guidance command.
+        
+        Args:
+            own_state: Own aircraft state
+            target_state: Target aircraft state
+            dt: Time step
+            
+        Returns:
+            Guidance command
         """
         # Extract states
-        int_pos = np.array(interceptor_state['position'])
-        tgt_pos = np.array(target_state['position'])
-        int_vel = interceptor_state.get('velocity', 50)
+        own_pos = np.array(own_state['position'])
+        own_vel = np.array(own_state['velocity'])
+        target_pos = np.array(target_state['position'])
+        target_vel = np.array(target_state.get('velocity', [0, 0, 0]))
         
-        # Calculate line of sight
-        los_vector = tgt_pos - int_pos
-        range_to_target = np.linalg.norm(los_vector)
+        # Relative kinematics
+        rel_pos = target_pos - own_pos
+        rel_vel = target_vel - own_vel
+        range_to_target = np.linalg.norm(rel_pos)
         
-        if range_to_target < 0.1:
+        if range_to_target < 1.0:
             return GuidanceCommand(
-                commanded_heading=interceptor_state.get('heading', 0),
-                commanded_altitude=int_pos[2],
-                commanded_velocity=int_vel,
-                commanded_throttle=0.5
+                acceleration_command=np.zeros(3),
+                heading_rate=0.0,
+                flight_path_rate=0.0,
+                throttle_command=0.5,
+                guidance_mode=self.name,
+                time_to_go=0.0,
+                predicted_miss_distance=range_to_target
             )
             
-        # Calculate LOS angles
-        los_azimuth = np.arctan2(los_vector[1], los_vector[0])
-        los_elevation = np.arctan2(los_vector[2], 
-                                   np.sqrt(los_vector[0]**2 + los_vector[1]**2))
+        # Line of sight vector
+        los = rel_pos / range_to_target
         
-        # Calculate LOS rates
-        if self.last_los_angle is not None:
-            los_rate_az = (los_azimuth - self.last_los_angle[0]) / dt
-            los_rate_el = (los_elevation - self.last_los_angle[1]) / dt
+        # Closing velocity
+        closing_vel = -np.dot(rel_vel, los)
+        
+        # LOS rate calculation
+        if self.previous_los is not None:
+            # Numerical differentiation
+            los_rate = (los - self.previous_los) / dt
             
-            # Simple low-pass filter for noise reduction
-            if self.los_rate_filter is not None:
-                alpha = 0.7  # Filter constant
-                los_rate_az = alpha * los_rate_az + (1-alpha) * self.los_rate_filter[0]
-                los_rate_el = alpha * los_rate_el + (1-alpha) * self.los_rate_filter[1]
-                
-            self.los_rate_filter = (los_rate_az, los_rate_el)
-        else:
-            los_rate_az = 0.0
-            los_rate_el = 0.0
-            self.los_rate_filter = (0.0, 0.0)
+            # Remove radial component
+            los_rate = los_rate - np.dot(los_rate, los) * los
             
-        self.last_los_angle = (los_azimuth, los_elevation)
-        
-        # Calculate closing velocity
-        if 'velocity_vector' in interceptor_state and 'velocity_vector' in target_state:
-            int_vel_vec = np.array(interceptor_state['velocity_vector'])
-            tgt_vel_vec = np.array(target_state['velocity_vector'])
-            closing_velocity = -np.dot(los_vector/range_to_target, 
-                                      int_vel_vec - tgt_vel_vec)
-        else:
-            closing_velocity = int_vel
+            # PN acceleration command: a = N * Vc * omega
+            accel_cmd = self.N * closing_vel * los_rate
             
-        # PN guidance law: a_cmd = N * Vc * λ_dot
-        lateral_accel_cmd = self.N * closing_velocity * los_rate_az
-        vertical_accel_cmd = self.N * closing_velocity * los_rate_el
-        
-        # Convert acceleration commands to heading and altitude
-        # Limit accelerations to aircraft capabilities
-        max_lateral_accel = 9.81 * 3  # 3g lateral
-        max_vertical_accel = 9.81 * 2  # 2g vertical
-        
-        lateral_accel_cmd = np.clip(lateral_accel_cmd, -max_lateral_accel, max_lateral_accel)
-        vertical_accel_cmd = np.clip(vertical_accel_cmd, -max_vertical_accel, max_vertical_accel)
-        
-        # Convert to heading change
-        if int_vel > 0:
-            heading_change = lateral_accel_cmd / int_vel * dt
+            # Limit acceleration
+            accel_magnitude = np.linalg.norm(accel_cmd)
+            if accel_magnitude > 30:  # 3g limit
+                accel_cmd = accel_cmd * (30 / accel_magnitude)
         else:
-            heading_change = 0
+            accel_cmd = np.zeros(3)
             
-        current_heading = interceptor_state.get('heading', 0)
-        commanded_heading = current_heading + heading_change
+        self.previous_los = los.copy()
         
-        # Altitude command based on vertical acceleration
-        altitude_change = vertical_accel_cmd * dt * dt / 2  # Simple integration
-        commanded_altitude = int_pos[2] + altitude_change + vertical_accel_cmd * 5  # Lead compensation
-        
-        # Speed control
-        if range_to_target > 2000:
-            commanded_throttle = 1.0
-        elif range_to_target > 500:
-            commanded_throttle = 0.85
+        # Convert to control rates
+        own_speed = np.linalg.norm(own_vel)
+        if own_speed > 1.0:
+            # Desired acceleration perpendicular to velocity
+            lateral_accel = accel_cmd - np.dot(accel_cmd, own_vel/own_speed) * (own_vel/own_speed)
+            
+            # Heading rate from horizontal acceleration
+            heading_rate = lateral_accel[1] * np.cos(np.arctan2(own_vel[1], own_vel[0])) - \
+                          lateral_accel[0] * np.sin(np.arctan2(own_vel[1], own_vel[0]))
+            heading_rate = heading_rate / (own_speed * np.cos(np.arcsin(-own_vel[2]/own_speed)))
+            
+            # Flight path rate from vertical acceleration
+            flight_path_rate = -lateral_accel[2] / own_speed
+            
+            heading_rate = np.clip(heading_rate, -1.0, 1.0)
+            flight_path_rate = np.clip(flight_path_rate, -0.5, 0.5)
         else:
-            commanded_throttle = 0.7
+            heading_rate = 0.0
+            flight_path_rate = 0.0
+            
+        # Time-to-go estimation
+        if closing_vel > 0:
+            time_to_go = range_to_target / closing_vel
+        else:
+            time_to_go = np.inf
+            
+        # Miss distance prediction (simplified)
+        miss_distance = np.linalg.norm(rel_pos + rel_vel * time_to_go) if time_to_go < 100 else range_to_target
+        
+        # Throttle control
+        if closing_vel < 10:  # Slow closing
+            throttle = 1.0
+        elif range_to_target < 500:  # Close range
+            throttle = 0.8
+        else:
+            throttle = 0.7
             
         return GuidanceCommand(
-            commanded_heading=commanded_heading,
-            commanded_altitude=commanded_altitude,
-            commanded_velocity=int_vel,
-            commanded_throttle=commanded_throttle,
-            mode="proportional_navigation"
+            acceleration_command=accel_cmd,
+            heading_rate=heading_rate,
+            flight_path_rate=flight_path_rate,
+            throttle_command=throttle,
+            guidance_mode=self.name,
+            time_to_go=time_to_go,
+            predicted_miss_distance=miss_distance
         )
 
 
 class AugmentedProportionalNavigation(ProportionalNavigation):
     """
-    Augmented Proportional Navigation (APN).
-    Adds target acceleration compensation to basic PN.
+    Augmented Proportional Navigation (APN) guidance law.
+    PN with target acceleration compensation.
     """
     
-    def __init__(self, navigation_gain: float = 4.0, config: Optional[Dict[str, Any]] = None):
-        super().__init__(navigation_gain, config)
-        self.last_target_vel = None
-        
-    def compute(self,
-                interceptor_state: Dict[str, Any],
-                target_state: Dict[str, Any],
-                dt: float = 0.02) -> GuidanceCommand:
-        """
-        Compute augmented proportional navigation.
-        """
-        # Get basic PN command
-        base_command = super().compute(interceptor_state, target_state, dt)
-        
-        # Estimate target acceleration
-        if 'velocity_vector' in target_state:
-            tgt_vel = np.array(target_state['velocity_vector'])
-            
-            if self.last_target_vel is not None:
-                tgt_accel = (tgt_vel - self.last_target_vel) / dt
-                
-                # Add compensation term
-                # APN: a_cmd = N * Vc * λ_dot + (N/2) * a_target_perpendicular
-                
-                # Project target acceleration perpendicular to LOS
-                int_pos = np.array(interceptor_state['position'])
-                tgt_pos = np.array(target_state['position'])
-                los_vector = tgt_pos - int_pos
-                range_to_target = np.linalg.norm(los_vector)
-                
-                if range_to_target > 0.1:
-                    los_unit = los_vector / range_to_target
-                    tgt_accel_perp = tgt_accel - np.dot(tgt_accel, los_unit) * los_unit
-                    
-                    # Add half the perpendicular target acceleration
-                    compensation = np.linalg.norm(tgt_accel_perp) * self.N / 2
-                    
-                    # Apply compensation to altitude command
-                    base_command.commanded_altitude += compensation * dt * 5
-                    
-            self.last_target_vel = tgt_vel
-            
-        return base_command
-
-
-class OptimalGuidance(GuidanceLaw):
-    """
-    Optimal guidance law minimizing control effort.
-    Based on optimal control theory.
-    """
-    
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict] = None):
         super().__init__(config)
-        self.time_constant = config.get('time_constant', 3.0) if config else 3.0
+        self.name = "augmented_pn"
+        self.previous_target_vel = None
         
-    def compute(self,
-                interceptor_state: Dict[str, Any],
-                target_state: Dict[str, Any],
-                dt: float = 0.02) -> GuidanceCommand:
+    def compute(self, own_state: Dict, target_state: Dict, dt: float) -> GuidanceCommand:
         """
-        Compute optimal guidance commands.
-        """
-        # Extract states
-        int_pos = np.array(interceptor_state['position'])
-        tgt_pos = np.array(target_state['position'])
-        int_vel_vec = np.array(interceptor_state.get('velocity_vector', [0, 0, 0]))
-        tgt_vel_vec = np.array(target_state.get('velocity_vector', [0, 0, 0]))
-        
-        # Calculate zero effort miss (ZEM)
-        rel_pos = tgt_pos - int_pos
-        rel_vel = tgt_vel_vec - int_vel_vec
-        range_to_target = np.linalg.norm(rel_pos)
-        
-        if range_to_target < 0.1:
-            return GuidanceCommand(
-                commanded_heading=interceptor_state.get('heading', 0),
-                commanded_altitude=int_pos[2],
-                commanded_velocity=interceptor_state.get('velocity', 50),
-                commanded_throttle=0.5
-            )
-            
-        # Estimate time-to-go
-        closing_speed = -np.dot(rel_pos, rel_vel) / range_to_target
-        if closing_speed > 1.0:
-            t_go = range_to_target / closing_speed
-        else:
-            t_go = 100.0
-            
-        # Calculate ZEM
-        zem = rel_pos + rel_vel * t_go
-        
-        # Optimal acceleration command
-        if t_go > 0.1:
-            n_opt = 3 * self.time_constant / (t_go * t_go)
-            accel_cmd = n_opt * zem / t_go
-        else:
-            accel_cmd = np.zeros(3)
-            
-        # Limit acceleration
-        max_accel = 9.81 * 4  # 4g limit
-        accel_mag = np.linalg.norm(accel_cmd)
-        if accel_mag > max_accel:
-            accel_cmd = accel_cmd * (max_accel / accel_mag)
-            
-        # Convert to heading and altitude commands
-        int_vel = np.linalg.norm(int_vel_vec)
-        if int_vel > 0:
-            # Lateral acceleration to heading rate
-            heading_rate = accel_cmd[1] / int_vel
-            commanded_heading = interceptor_state.get('heading', 0) + heading_rate * dt
-            
-            # Vertical acceleration to altitude rate
-            altitude_rate = accel_cmd[2]
-            commanded_altitude = int_pos[2] + altitude_rate * dt * 5
-        else:
-            commanded_heading = interceptor_state.get('heading', 0)
-            commanded_altitude = int_pos[2]
-            
-        # Speed control based on time-to-go
-        if t_go > 20:
-            commanded_throttle = 1.0
-        elif t_go > 5:
-            commanded_throttle = 0.85
-        else:
-            commanded_throttle = 0.7
-            
-        return GuidanceCommand(
-            commanded_heading=commanded_heading,
-            commanded_altitude=commanded_altitude,
-            commanded_velocity=int_vel,
-            commanded_throttle=commanded_throttle,
-            mode="optimal_guidance"
-        )
-
-
-class PredictiveGuidance(GuidanceLaw):
-    """
-    Predictive guidance using target motion prediction.
-    Good for maneuvering targets.
-    """
-    
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__(config)
-        self.prediction_horizon = config.get('prediction_horizon', 5.0) if config else 5.0
-        self.target_history = []
-        self.max_history = 10
-        
-    def _predict_target_position(self, current_state: Dict, prediction_time: float) -> np.ndarray:
-        """
-        Predict target position using motion history.
-        """
-        current_pos = np.array(current_state['position'])
-        
-        if len(self.target_history) < 2:
-            # Simple linear prediction
-            if 'velocity_vector' in current_state:
-                vel = np.array(current_state['velocity_vector'])
-                return current_pos + vel * prediction_time
-            else:
-                return current_pos
-                
-        # Estimate acceleration from history
-        if len(self.target_history) >= 3:
-            # Use last 3 points for quadratic prediction
-            t = [h['time'] for h in self.target_history[-3:]]
-            pos = [h['position'] for h in self.target_history[-3:]]
-            
-            dt1 = t[-1] - t[-2]
-            dt2 = t[-2] - t[-3]
-            
-            if dt1 > 0 and dt2 > 0:
-                vel1 = (pos[-1] - pos[-2]) / dt1
-                vel2 = (pos[-2] - pos[-3]) / dt2
-                accel = (vel1 - vel2) / ((dt1 + dt2) / 2)
-                
-                # Quadratic prediction
-                vel = np.array(current_state.get('velocity_vector', vel1))
-                predicted_pos = current_pos + vel * prediction_time + 0.5 * accel * prediction_time**2
-                return predicted_pos
-                
-        # Fallback to linear prediction
-        vel = np.array(current_state.get('velocity_vector', [0, 0, 0]))
-        return current_pos + vel * prediction_time
-        
-    def compute(self,
-                interceptor_state: Dict[str, Any],
-                target_state: Dict[str, Any],
-                dt: float = 0.02) -> GuidanceCommand:
-        """
-        Compute predictive guidance.
-        """
-        # Update target history
-        self.target_history.append({
-            'time': interceptor_state.get('time', 0),
-            'position': np.array(target_state['position']),
-            'velocity': np.array(target_state.get('velocity_vector', [0, 0, 0]))
-        })
-        
-        if len(self.target_history) > self.max_history:
-            self.target_history.pop(0)
-            
-        # Extract states
-        int_pos = np.array(interceptor_state['position'])
-        int_vel = interceptor_state.get('velocity', 50)
-        
-        # Estimate intercept time
-        current_range = np.linalg.norm(np.array(target_state['position']) - int_pos)
-        estimated_intercept_time = min(current_range / int_vel, self.prediction_horizon)
-        
-        # Predict target position
-        predicted_target_pos = self._predict_target_position(target_state, estimated_intercept_time)
-        
-        # Calculate intercept trajectory
-        intercept_vector = predicted_target_pos - int_pos
-        intercept_range = np.linalg.norm(intercept_vector)
-        
-        if intercept_range < 0.1:
-            return GuidanceCommand(
-                commanded_heading=interceptor_state.get('heading', 0),
-                commanded_altitude=int_pos[2],
-                commanded_velocity=int_vel,
-                commanded_throttle=0.5
-            )
-            
-        # Command heading toward predicted intercept point
-        commanded_heading = np.arctan2(intercept_vector[1], intercept_vector[0])
-        commanded_altitude = predicted_target_pos[2]
-        
-        # Adjust speed based on prediction confidence
-        if len(self.target_history) >= 3:
-            # High confidence - aggressive pursuit
-            if current_range > 2000:
-                commanded_throttle = 1.0
-            elif current_range > 500:
-                commanded_throttle = 0.9
-            else:
-                commanded_throttle = 0.75
-        else:
-            # Low confidence - conservative approach
-            commanded_throttle = 0.8
-            
-        return GuidanceCommand(
-            commanded_heading=commanded_heading,
-            commanded_altitude=commanded_altitude,
-            commanded_velocity=int_vel,
-            commanded_throttle=commanded_throttle,
-            mode="predictive_guidance"
-        )
-
-
-class HybridGuidance:
-    """
-    Hybrid guidance system that switches between different guidance laws
-    based on engagement geometry and phase.
-    """
-    
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize hybrid guidance system.
+        Compute APN guidance command.
         
         Args:
-            config: Configuration parameters
-        """
-        self.config = config or {}
-        
-        # Initialize individual guidance laws
-        self.pure_pursuit = PurePursuit()
-        self.lead_pursuit = LeadPursuit()
-        self.pn_guidance = ProportionalNavigation(navigation_gain=3.0)
-        self.apn_guidance = AugmentedProportionalNavigation(navigation_gain=4.0)
-        self.optimal_guidance = OptimalGuidance()
-        self.predictive_guidance = PredictiveGuidance()
-        
-        # Mode selection parameters
-        self.long_range_threshold = config.get('long_range', 5000) if config else 5000
-        self.medium_range_threshold = config.get('medium_range', 1000) if config else 1000
-        self.close_range_threshold = config.get('close_range', 200) if config else 200
-        
-        self.current_mode = None
-        
-    def select_mode(self, 
-                   range_to_target: float,
-                   closing_velocity: float,
-                   target_maneuvering: bool = False) -> GuidanceMode:
-        """
-        Select appropriate guidance mode based on engagement conditions.
-        
-        Args:
-            range_to_target: Distance to target in meters
-            closing_velocity: Closing velocity in m/s (positive = closing)
-            target_maneuvering: Whether target is maneuvering
-            
-        Returns:
-            Selected guidance mode
-        """
-        if range_to_target > self.long_range_threshold:
-            # Long range - use lead pursuit or predictive
-            if target_maneuvering:
-                return GuidanceMode.PREDICTIVE_GUIDANCE
-            else:
-                return GuidanceMode.LEAD_PURSUIT
-                
-        elif range_to_target > self.medium_range_threshold:
-            # Medium range - use PN or APN
-            if target_maneuvering:
-                return GuidanceMode.AUGMENTED_PN
-            else:
-                return GuidanceMode.PROPORTIONAL_NAVIGATION
-                
-        elif range_to_target > self.close_range_threshold:
-            # Short range - use optimal guidance
-            return GuidanceMode.OPTIMAL_GUIDANCE
-            
-        else:
-            # Terminal phase - pure pursuit for simplicity
-            return GuidanceMode.PURE_PURSUIT
-            
-    def compute(self,
-                interceptor_state: Dict[str, Any],
-                target_state: Dict[str, Any],
-                dt: float = 0.02) -> GuidanceCommand:
-        """
-        Compute hybrid guidance commands.
-        
-        Args:
-            interceptor_state: Current interceptor state
-            target_state: Current target state  
+            own_state: Own aircraft state
+            target_state: Target aircraft state
             dt: Time step
             
         Returns:
-            Guidance command with selected mode
+            Guidance command
         """
-        # Calculate engagement parameters
-        int_pos = np.array(interceptor_state['position'])
-        tgt_pos = np.array(target_state['position'])
-        range_to_target = np.linalg.norm(tgt_pos - int_pos)
+        # Get base PN command
+        pn_command = super().compute(own_state, target_state, dt)
         
-        # Calculate closing velocity
-        if 'velocity_vector' in interceptor_state and 'velocity_vector' in target_state:
-            int_vel = np.array(interceptor_state['velocity_vector'])
-            tgt_vel = np.array(target_state['velocity_vector'])
-            los_unit = (tgt_pos - int_pos) / max(range_to_target, 0.1)
-            closing_velocity = -np.dot(los_unit, int_vel - tgt_vel)
-        else:
-            closing_velocity = interceptor_state.get('velocity', 50)
-            
-        # Detect if target is maneuvering (simplified)
-        target_maneuvering = False
-        if 'acceleration' in target_state:
-            target_accel = np.linalg.norm(target_state['acceleration'])
-            target_maneuvering = target_accel > 5.0  # More than 0.5g
-            
-        # Select guidance mode
-        mode = self.select_mode(range_to_target, closing_velocity, target_maneuvering)
+        # Add target acceleration compensation
+        target_vel = np.array(target_state.get('velocity', [0, 0, 0]))
         
-        # Execute selected guidance law
-        if mode == GuidanceMode.PURE_PURSUIT:
-            command = self.pure_pursuit.compute(interceptor_state, target_state, dt)
-        elif mode == GuidanceMode.LEAD_PURSUIT:
-            command = self.lead_pursuit.compute(interceptor_state, target_state, dt)
-        elif mode == GuidanceMode.PROPORTIONAL_NAVIGATION:
-            command = self.pn_guidance.compute(interceptor_state, target_state, dt)
-        elif mode == GuidanceMode.AUGMENTED_PN:
-            command = self.apn_guidance.compute(interceptor_state, target_state, dt)
-        elif mode == GuidanceMode.OPTIMAL_GUIDANCE:
-            command = self.optimal_guidance.compute(interceptor_state, target_state, dt)
-        elif mode == GuidanceMode.PREDICTIVE_GUIDANCE:
-            command = self.predictive_guidance.compute(interceptor_state, target_state, dt)
-        else:
-            # Fallback to pure pursuit
-            command = self.pure_pursuit.compute(interceptor_state, target_state, dt)
+        if self.previous_target_vel is not None:
+            # Estimate target acceleration
+            target_accel = (target_vel - self.previous_target_vel) / dt
             
-        # Update mode in command
-        command.mode = mode.value
-        self.current_mode = mode
+            # Add compensation term (N/2 * at)
+            compensation = (self.N / 2) * target_accel
+            
+            # Limit compensation
+            comp_magnitude = np.linalg.norm(compensation)
+            if comp_magnitude > 10:  # 1g limit for compensation
+                compensation = compensation * (10 / comp_magnitude)
+                
+            pn_command.acceleration_command += compensation
+            
+            # Recompute control rates with augmented acceleration
+            accel_total = pn_command.acceleration_command
+            accel_magnitude = np.linalg.norm(accel_total)
+            if accel_magnitude > 30:  # 3g total limit
+                accel_total = accel_total * (30 / accel_magnitude)
+                pn_command.acceleration_command = accel_total
+                
+        self.previous_target_vel = target_vel.copy()
+        
+        return pn_command
+
+
+class OptimalGuidanceLaw(GuidanceLaw):
+    """
+    Optimal Guidance Law (OGL) for energy-optimal interception.
+    Based on optimal control theory.
+    """
+    
+    def __init__(self, config: Optional[Dict] = None):
+        super().__init__(config)
+        self.name = "optimal_guidance"
+        self.gravity = 9.81
+        
+    def compute(self, own_state: Dict, target_state: Dict, dt: float) -> GuidanceCommand:
+        """
+        Compute optimal guidance command.
+        
+        Args:
+            own_state: Own aircraft state
+            target_state: Target aircraft state
+            dt: Time step
+            
+        Returns:
+            Guidance command
+        """
+        # Extract states
+        own_pos = np.array(own_state['position'])
+        own_vel = np.array(own_state['velocity'])
+        target_pos = np.array(target_state['position'])
+        target_vel = np.array(target_state.get('velocity', [0, 0, 0]))
+        
+        # Relative kinematics
+        rel_pos = target_pos - own_pos
+        rel_vel = target_vel - own_vel
+        range_to_target = np.linalg.norm(rel_pos)
+        
+        # Estimate time-to-go
+        closing_speed = -np.dot(rel_vel, rel_pos) / range_to_target
+        if closing_speed > 0:
+            tgo = range_to_target / closing_speed
+        else:
+            tgo = 100.0  # Large value
+            
+        if tgo < 0.1:  # Very close
+            return GuidanceCommand(
+                acceleration_command=np.zeros(3),
+                heading_rate=0.0,
+                flight_path_rate=0.0,
+                throttle_command=0.5,
+                guidance_mode=self.name,
+                time_to_go=tgo,
+                predicted_miss_distance=range_to_target
+            )
+            
+        # Zero-effort miss (ZEM) calculation
+        zem = rel_pos + rel_vel * tgo
+        zem_magnitude = np.linalg.norm(zem)
+        
+        # Optimal acceleration command
+        # a = -6 * ZEM / tgo^2 (for minimum energy)
+        if tgo < 100:
+            accel_cmd = -6 * zem / (tgo * tgo)
+            
+            # Add gravity compensation
+            accel_cmd[2] -= self.gravity
+            
+            # Limit acceleration
+            accel_magnitude = np.linalg.norm(accel_cmd)
+            if accel_magnitude > 30:  # 3g limit
+                accel_cmd = accel_cmd * (30 / accel_magnitude)
+        else:
+            # Fall back to pursuit if tgo is large
+            pursuit = PurePursuit()
+            return pursuit.compute(own_state, target_state, dt)
+            
+        # Convert to control rates
+        own_speed = np.linalg.norm(own_vel)
+        if own_speed > 1.0:
+            # Project acceleration perpendicular to velocity
+            lateral_accel = accel_cmd - np.dot(accel_cmd, own_vel/own_speed) * (own_vel/own_speed)
+            
+            # Compute rates
+            heading_rate = (lateral_accel[0] * own_vel[1] - lateral_accel[1] * own_vel[0]) / (own_speed * own_speed)
+            flight_path_rate = -lateral_accel[2] / own_speed
+            
+            heading_rate = np.clip(heading_rate, -1.0, 1.0)
+            flight_path_rate = np.clip(flight_path_rate, -0.5, 0.5)
+        else:
+            heading_rate = 0.0
+            flight_path_rate = 0.0
+            
+        # Optimal throttle based on energy management
+        energy_to_target = 0.5 * own_speed * own_speed + self.gravity * (target_pos[2] - own_pos[2])
+        if energy_to_target > 0:
+            throttle = 0.7  # Maintain energy
+        else:
+            throttle = 1.0  # Need more energy
+            
+        return GuidanceCommand(
+            acceleration_command=accel_cmd,
+            heading_rate=heading_rate,
+            flight_path_rate=flight_path_rate,
+            throttle_command=throttle,
+            guidance_mode=self.name,
+            time_to_go=tgo,
+            predicted_miss_distance=zem_magnitude
+        )
+
+
+class ModelPredictiveControl(GuidanceLaw):
+    """
+    Model Predictive Control (MPC) guidance.
+    Optimizes trajectory over prediction horizon.
+    """
+    
+    def __init__(self, config: Optional[Dict] = None):
+        super().__init__(config)
+        self.name = "model_predictive_control"
+        self.horizon = config.get('horizon', 10) if config else 10
+        self.dt_horizon = config.get('dt_horizon', 0.5) if config else 0.5
+        self.Q = np.diag([1.0, 1.0, 1.0])  # Position error weight
+        self.R = np.diag([0.1, 0.1, 0.1])  # Control effort weight
+        
+    def compute(self, own_state: Dict, target_state: Dict, dt: float) -> GuidanceCommand:
+        """
+        Compute MPC guidance command.
+        Simplified version - full MPC would use optimization solver.
+        
+        Args:
+            own_state: Own aircraft state
+            target_state: Target aircraft state
+            dt: Time step
+            
+        Returns:
+            Guidance command
+        """
+        # Extract states
+        own_pos = np.array(own_state['position'])
+        own_vel = np.array(own_state['velocity'])
+        target_pos = np.array(target_state['position'])
+        target_vel = np.array(target_state.get('velocity', [0, 0, 0]))
+        
+        # Predict target trajectory
+        target_trajectory = []
+        for i in range(self.horizon):
+            t_future = i * self.dt_horizon
+            # Simple constant velocity prediction
+            target_future = target_pos + target_vel * t_future
+            target_trajectory.append(target_future)
+            
+        # Simplified MPC: compute average desired acceleration
+        accel_cmd = np.zeros(3)
+        total_weight = 0.0
+        
+        for i, target_future in enumerate(target_trajectory):
+            t_future = (i + 1) * self.dt_horizon
+            
+            # Where we want to be
+            desired_pos = target_future
+            
+            # Where we will be with current velocity
+            predicted_pos = own_pos + own_vel * t_future + 0.5 * accel_cmd * t_future * t_future
+            
+            # Position error
+            error = desired_pos - predicted_pos
+            
+            # Weight (closer time steps more important)
+            weight = 1.0 / (i + 1)
+            
+            # Desired acceleration to correct error
+            if t_future > 0:
+                desired_accel = 2 * error / (t_future * t_future)
+                accel_cmd += weight * desired_accel
+                total_weight += weight
+                
+        if total_weight > 0:
+            accel_cmd /= total_weight
+            
+        # Limit acceleration
+        accel_magnitude = np.linalg.norm(accel_cmd)
+        if accel_magnitude > 30:  # 3g limit
+            accel_cmd = accel_cmd * (30 / accel_magnitude)
+            
+        # Convert to control rates
+        own_speed = np.linalg.norm(own_vel)
+        if own_speed > 1.0:
+            lateral_accel = accel_cmd - np.dot(accel_cmd, own_vel/own_speed) * (own_vel/own_speed)
+            heading_rate = (lateral_accel[0] * own_vel[1] - lateral_accel[1] * own_vel[0]) / (own_speed * own_speed)
+            flight_path_rate = -lateral_accel[2] / own_speed
+            
+            heading_rate = np.clip(heading_rate, -1.0, 1.0)
+            flight_path_rate = np.clip(flight_path_rate, -0.5, 0.5)
+        else:
+            heading_rate = 0.0
+            flight_path_rate = 0.0
+            
+        # Time-to-go and miss distance
+        rel_pos = target_pos - own_pos
+        range_to_target = np.linalg.norm(rel_pos)
+        closing_speed = -np.dot(target_vel - own_vel, rel_pos) / range_to_target
+        
+        if closing_speed > 0:
+            time_to_go = range_to_target / closing_speed
+            predicted_miss = np.linalg.norm(rel_pos + (target_vel - own_vel) * time_to_go)
+        else:
+            time_to_go = np.inf
+            predicted_miss = range_to_target
+            
+        # MPC typically optimizes throttle too
+        if range_to_target > 1000:
+            throttle = 0.8
+        elif range_to_target > 500:
+            throttle = 0.7
+        else:
+            throttle = 0.6
+            
+        return GuidanceCommand(
+            acceleration_command=accel_cmd,
+            heading_rate=heading_rate,
+            flight_path_rate=flight_path_rate,
+            throttle_command=throttle,
+            guidance_mode=self.name,
+            time_to_go=time_to_go,
+            predicted_miss_distance=predicted_miss
+        )
+
+
+class GuidanceLawSelector:
+    """
+    Selects appropriate guidance law based on engagement conditions.
+    """
+    
+    def __init__(self):
+        """Initialize guidance law selector with all available laws"""
+        self.laws = {
+            'pure_pursuit': PurePursuit(),
+            'proportional_navigation': ProportionalNavigation(),
+            'augmented_pn': AugmentedProportionalNavigation(),
+            'optimal_guidance': OptimalGuidanceLaw(),
+            'model_predictive_control': ModelPredictiveControl()
+        }
+        
+        self.current_law = 'proportional_navigation'
+        self.switch_hysteresis_time = 2.0  # seconds
+        self.last_switch_time = 0.0
+        
+    def select_guidance_law(self, own_state: Dict, target_state: Dict, 
+                           mission_phase: str, current_time: float) -> str:
+        """
+        Select appropriate guidance law based on conditions.
+        
+        Args:
+            own_state: Own aircraft state
+            target_state: Target state
+            mission_phase: Current mission phase
+            current_time: Current simulation time
+            
+        Returns:
+            Selected guidance law name
+        """
+        # Prevent rapid switching
+        if current_time - self.last_switch_time < self.switch_hysteresis_time:
+            return self.current_law
+            
+        # Extract key parameters
+        rel_pos = np.array(target_state['position']) - np.array(own_state['position'])
+        range_to_target = np.linalg.norm(rel_pos)
+        
+        rel_vel = np.array(target_state.get('velocity', [0,0,0])) - np.array(own_state['velocity'])
+        closing_speed = -np.dot(rel_vel, rel_pos) / max(range_to_target, 1.0)
+        
+        # Selection logic
+        selected = self.current_law
+        
+        if mission_phase == 'search' or mission_phase == 'track':
+            # Use simple pursuit for search/track
+            selected = 'pure_pursuit'
+            
+        elif mission_phase == 'intercept':
+            if range_to_target > 2000:
+                # Long range - use PN
+                selected = 'proportional_navigation'
+            elif range_to_target > 500:
+                # Medium range - use APN for maneuvering targets
+                target_accel = target_state.get('acceleration', np.zeros(3))
+                if np.linalg.norm(target_accel) > 5:  # Target maneuvering
+                    selected = 'augmented_pn'
+                else:
+                    selected = 'proportional_navigation'
+            elif range_to_target > 100:
+                # Short range - use optimal guidance
+                selected = 'optimal_guidance'
+            else:
+                # Terminal phase - use MPC for precise control
+                selected = 'model_predictive_control'
+                
+        elif mission_phase == 'evade':
+            # Use MPC for evasive maneuvers
+            selected = 'model_predictive_control'
+            
+        # Update if changed
+        if selected != self.current_law:
+            self.current_law = selected
+            self.last_switch_time = current_time
+            print(f"[GUIDANCE] Switched to {selected} at range {range_to_target:.0f}m")
+            
+        return self.current_law
+        
+    def compute(self, own_state: Dict, target_state: Dict, 
+               mission_phase: str, current_time: float, dt: float) -> GuidanceCommand:
+        """
+        Compute guidance command using selected law.
+        
+        Args:
+            own_state: Own aircraft state
+            target_state: Target state
+            mission_phase: Current mission phase
+            current_time: Current simulation time
+            dt: Time step
+            
+        Returns:
+            Guidance command
+        """
+        # Select appropriate law
+        law_name = self.select_guidance_law(own_state, target_state, mission_phase, current_time)
+        
+        # Compute command
+        law = self.laws[law_name]
+        command = law.compute(own_state, target_state, dt)
         
         return command
-        
-    def reset(self):
-        """Reset all guidance laws"""
-        self.pure_pursuit.reset()
-        self.lead_pursuit.reset()
-        self.pn_guidance.reset()
-        self.apn_guidance.reset()
-        self.optimal_guidance.reset()
-        self.predictive_guidance.reset()
-        self.current_mode = None
