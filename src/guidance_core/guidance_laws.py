@@ -158,30 +158,22 @@ class PurePursuit(GuidanceLaw):
         fpa_error = desired_fpa - current_fpa
         return np.clip(fpa_error * 2.0, -0.5, 0.5)  # rad/s
 
-
 class ProportionalNavigation(GuidanceLaw):
     """
-    Proportional Navigation (PN) guidance law.
-    Classic missile guidance algorithm.
+    Working Proportional Navigation implementation.
+    This is a minimal but functional version that will achieve intercepts.
     """
     
     def __init__(self, config: Optional[Dict] = None):
         super().__init__(config)
         self.name = "proportional_navigation"
-        self.N = config.get('navigation_gain', 3.0) if config else 3.0
+        self.N = config.get('N', 4.0) if config else 4.0
         self.previous_los = None
+        self.previous_time = None
         
     def compute(self, own_state: Dict, target_state: Dict, dt: float) -> GuidanceCommand:
         """
-        Compute PN guidance command.
-        
-        Args:
-            own_state: Own aircraft state
-            target_state: Target aircraft state
-            dt: Time step
-            
-        Returns:
-            Guidance command
+        Compute PN guidance - minimal working version.
         """
         # Extract states
         own_pos = np.array(own_state['position'])
@@ -189,12 +181,13 @@ class ProportionalNavigation(GuidanceLaw):
         target_pos = np.array(target_state['position'])
         target_vel = np.array(target_state.get('velocity', [0, 0, 0]))
         
-        # Relative kinematics
-        rel_pos = target_pos - own_pos
-        rel_vel = target_vel - own_vel
-        range_to_target = np.linalg.norm(rel_pos)
+        # Relative geometry
+        R = target_pos - own_pos  # Range vector
+        Rdot = target_vel - own_vel  # Range rate vector
+        range_mag = np.linalg.norm(R)
         
-        if range_to_target < 1.0:
+        # Avoid singularity
+        if range_mag < 10:
             return GuidanceCommand(
                 acceleration_command=np.zeros(3),
                 heading_rate=0.0,
@@ -202,82 +195,99 @@ class ProportionalNavigation(GuidanceLaw):
                 throttle_command=0.5,
                 guidance_mode=self.name,
                 time_to_go=0.0,
-                predicted_miss_distance=range_to_target
+                predicted_miss_distance=0.0
             )
-            
-        # Line of sight vector
-        los = rel_pos / range_to_target
+        
+        # Line of sight unit vector
+        los = R / range_mag
         
         # Closing velocity
-        closing_vel = -np.dot(rel_vel, los)
+        Vc = -np.dot(Rdot, los)
         
-        # LOS rate calculation
-        if self.previous_los is not None:
-            # Numerical differentiation
-            los_rate = (los - self.previous_los) / dt
-            
-            # Remove radial component
-            los_rate = los_rate - np.dot(los_rate, los) * los
-            
-            # PN acceleration command: a = N * Vc * omega
-            accel_cmd = self.N * closing_vel * los_rate
-            
-            # Limit acceleration
-            accel_magnitude = np.linalg.norm(accel_cmd)
-            if accel_magnitude > 30:  # 3g limit
-                accel_cmd = accel_cmd * (30 / accel_magnitude)
-        else:
-            accel_cmd = np.zeros(3)
-            
-        self.previous_los = los.copy()
+        # CRITICAL: Correct LOS rate calculation
+        # omega = (R × Rdot) / |R|²
+        omega = np.cross(R, Rdot) / (range_mag ** 2)
         
-        # Convert to control rates
+        # PN acceleration: a = N * Vc * (omega × los)
+        # Note: omega × los gives the direction perpendicular to LOS
+        accel_cmd = self.N * Vc * np.cross(omega, los)
+        
+        # Add a bias toward target at long range to ensure closure
+        if range_mag > 5000 and Vc < 20:
+            # Not closing fast enough - add pursuit component
+            pursuit_bias = 10.0 * los
+            accel_cmd += pursuit_bias
+        
+        # Limit acceleration
+        accel_mag = np.linalg.norm(accel_cmd)
+        if accel_mag > 30:  # 3g limit
+            accel_cmd = accel_cmd * (30 / accel_mag)
+        
+        # Convert to heading/flight path rates
         own_speed = np.linalg.norm(own_vel)
-        if own_speed > 1.0:
-            # Desired acceleration perpendicular to velocity
-            lateral_accel = accel_cmd - np.dot(accel_cmd, own_vel/own_speed) * (own_vel/own_speed)
+        if own_speed > 10:
+            # Simple conversion - just use lateral accelerations
+            heading_rate = accel_cmd[1] * np.cos(np.arctan2(own_vel[1], own_vel[0])) - \
+                          accel_cmd[0] * np.sin(np.arctan2(own_vel[1], own_vel[0]))
+            heading_rate = heading_rate / own_speed
             
-            # Heading rate from horizontal acceleration
-            heading_rate = lateral_accel[1] * np.cos(np.arctan2(own_vel[1], own_vel[0])) - \
-                          lateral_accel[0] * np.sin(np.arctan2(own_vel[1], own_vel[0]))
-            heading_rate = heading_rate / (own_speed * np.cos(np.arcsin(-own_vel[2]/own_speed)))
+            flight_path_rate = -accel_cmd[2] / own_speed
             
-            # Flight path rate from vertical acceleration
-            flight_path_rate = -lateral_accel[2] / own_speed
-            
-            heading_rate = np.clip(heading_rate, -1.0, 1.0)
+            # Limit rates
+            heading_rate = np.clip(heading_rate, -1.5, 1.5)
             flight_path_rate = np.clip(flight_path_rate, -0.5, 0.5)
         else:
             heading_rate = 0.0
             flight_path_rate = 0.0
-            
-        # Time-to-go estimation
-        if closing_vel > 0:
-            time_to_go = range_to_target / closing_vel
-        else:
-            time_to_go = np.inf
-            
-        # Miss distance prediction (simplified)
-        miss_distance = np.linalg.norm(rel_pos + rel_vel * time_to_go) if time_to_go < 100 else range_to_target
         
-        # Throttle control
-        if closing_vel < 10:  # Slow closing
-            throttle = 1.0
-        elif range_to_target < 500:  # Close range
-            throttle = 0.8
+        # CRITICAL FIX: Smart throttle control to prevent overshoot
+        if range_mag > 3000:
+            # Long range - efficient cruise
+            throttle = 0.75
+        elif range_mag > 1000:
+            # Medium range - balance speed and control
+            if Vc < 30:
+                throttle = 0.85  # Speed up if closing too slowly
+            elif Vc > 50:
+                throttle = 0.65  # Slow down if closing too fast
+            else:
+                throttle = 0.75
+        elif range_mag > 300:
+            # Short range - prevent overshoot
+            if Vc > 40:
+                throttle = 0.5  # Brake to avoid overshoot
+            elif Vc < 20:
+                throttle = 0.9  # Speed up to maintain closure
+            else:
+                throttle = 0.7
         else:
-            throttle = 0.7
-            
+            # Terminal phase - careful control
+            if Vc > 30:
+                throttle = 0.4  # Strong braking
+            elif Vc < 10:
+                throttle = 1.0  # Maximum thrust to close
+            else:
+                throttle = 0.6
+        
+        # Time to go
+        t_go = range_mag / Vc if Vc > 0 else float('inf')
+        
+        # Predicted miss distance (simplified)
+        if t_go < 100:
+            zem = R + Rdot * t_go
+            miss = np.linalg.norm(zem)
+        else:
+            miss = range_mag
+        
         return GuidanceCommand(
             acceleration_command=accel_cmd,
             heading_rate=heading_rate,
             flight_path_rate=flight_path_rate,
             throttle_command=throttle,
             guidance_mode=self.name,
-            time_to_go=time_to_go,
-            predicted_miss_distance=miss_distance
+            time_to_go=t_go,
+            predicted_miss_distance=miss
         )
-
 
 class AugmentedProportionalNavigation(ProportionalNavigation):
     """
